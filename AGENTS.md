@@ -1,13 +1,13 @@
 # AGENTS.md — oagentkit/guardx
 
-> 安全围栏，6 个包：`fence` `logredact` `egress` `permgate` `bashguard` `audit`
+> 安全围栏，7 个包：`fence` `injectband` `logredact` `egress` `permgate` `bashguard` `audit`
 > module：`github.com/oagentkit/guardx` · org：[oagentkit = Open Agent Kit](https://github.com/oagentkit)
 > 矩阵分层：**tier 0（基础层）**
 
 ## 本仓包含
 
 ```
-audit/  bashguard/  egress/  fence/  logredact/  permgate/
+audit/  bashguard/  egress/  fence/  injectband/  logredact/  permgate/
 ```
 
 ## 硬规则
@@ -22,6 +22,10 @@ audit/  bashguard/  egress/  fence/  logredact/  permgate/
 
 - **`fence`** —— 任何把 LLM 产出或用户输入拼进 prompt 的路径都必须过 `EscapeUntrusted`。
   不得为了「可读性」绕过它。
+- **`injectband`** —— 与 `fence` 互补，封的是**相反方向**：`fence` 标「这是不可信数据」
+  （数据侧），`injectband` 标「这是系统带外注入」（系统侧）。系统写入模型的提示必须过
+  `Wrap` / `SanitizeBody`，**不得为省事直接拼字符串** —— 那正是伪造身份抬升权限的入口。
+  两者不可互相替代：只做 `fence` 时，攻击者不必逃出数据区，写一个像系统注入的标签即可。
 - **`egress`** —— 任何由 LLM 决定的 URL 出站前必须过 egress 判定。
   **不得新增「信任 LLM 给出的 URL」这类豁免分支** —— 那是提示词注入的直接落点。
 - **`bashguard`** —— 静态解析，不执行命令。**不得改成 exec 执行后再判断**。
