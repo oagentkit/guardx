@@ -2,6 +2,31 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.7.0] — 2026-10-19
+
+### 重构：audit / bashguard 迁出本仓，回到单 module 零依赖
+
+BREAKING CHANGE: github.com/oagentkit/guardx/audit 与
+github.com/oagentkit/guardx/bashguard 不再属于本仓模块。
+迁往：
+- audit     → github.com/oagentkit/obs/audit      （依赖 oekit/logx）
+- bashguard → github.com/oagentkit/tools/bashguard（依赖 mvdan.cc/sh/v3）
+为什么：Go 的依赖面按 **module** 结算，不按 package。只 import logredact 的下游，
+模块图里也会多出本仓的整条 require（实测拆分前会多出 oekit/logx 与 mvdan.cc/sh）。
+本仓是 tier 0 基础层，地板被所有下游继承——带重依赖的能力该待在本来就带该
+依赖的重仓里（obs 本就带 logx，tools 是重仓）。
+本仓回到：**1 个 Go module、1 条版本线、零外部依赖**（go list -m all 只有自己
+一行）。此前短暂的嵌套 module 布局（audit/ 与 bashguard/ 各带 go.mod）作废：
+那会让「一仓一 module」的矩阵模型破掉——版本线分裂、矩阵与门禁都得加特例。
+⚠️ 嵌套 module 的两个 tag（audit/v0.1.0 / bashguard/v0.1.0）**保留不动**
+（已发布物不动，动了会毁掉消费方 go.sum 里的校验和），但那条线**已冻结**，
+不再有后续版本——新代码请用上面的新路径。
+关联 oagentkit/guardx#3
+
+- 文档(changelog)：补 CHANGELOG.md（从 git 历史生成）
+
+- 测试(logredact)：修 ineffassign（append 结果未使用）
+
 ## [v0.6.0] — 2026-10-19
 
 ### 新增(logredact)!：规则表可组合 + 保定位线索掩码档；audit/bashguard 拆嵌套模块
