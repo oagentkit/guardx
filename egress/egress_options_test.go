@@ -13,6 +13,11 @@ func TestCheckHostWithAllowLoopback(t *testing.T) {
 	if err := CheckHost("127.0.0.1"); err == nil {
 		t.Fatal("缺省应拒绝回环")
 	}
+	// AllowLoopback 只放行 0.0.0.0 这一个字面量，不覆盖 0.0.0.0/8 余下整段
+	//（"this network" 保留段，与 CGNAT/benchmark 同列）
+	if err := CheckHostWith("0.1.2.3", o); err == nil {
+		t.Fatal("0.0.0.0/8 余段不应被 AllowLoopback 放行")
+	}
 }
 
 func TestCheckHostWithAllowPrivate(t *testing.T) {

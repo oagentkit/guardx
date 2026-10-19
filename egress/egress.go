@@ -52,7 +52,9 @@ func Check(rawURL string) error {
 type Options struct {
 	// AllowPrivate 放行私网段（IPv4 RFC1918 / IPv6 唯一本地）。
 	AllowPrivate bool
-	// AllowLoopback 放行回环与未指定地址（0.0.0.0/::）。
+	// AllowLoopback 放行回环与未指定地址（仅 127.0.0.0/8、::1、0.0.0.0、::
+	// 四个字面量）。0.0.0.0/8 余下整段是 RFC 1122 的 "this network" 保留段，
+	// 与 CGNAT/benchmark 同列——不在放行面内。
 	AllowLoopback bool
 }
 
@@ -148,7 +150,14 @@ func unwrapNAT64(a netip.Addr) (netip.Addr, bool) {
 
 // ipv4ExplicitBlocks 标准库判定之外显式列出的非公网 IPv4 段
 // （对标 ipaddr.js range()!=="unicast" 的补集 + benchmark 段）。
+//
+// 前提：netip 谓词里没有任何一个等价于某整段。前缀判定只覆盖 IsLoopback
+// （127/8）、IsPrivate（RFC1918）、IsLinkLocalUnicast（169.254/16）、
+// IsMulticast（224/4）四个「恰好等于整段」的情形；IsUnspecified 只匹配全零
+// 这一个地址，**不是 0.0.0.0/8 的判定**——整段必须在此表显式列出，否则
+// 0.1.2.3 一类目标会静默放行。改这张表时按整段逐条对，不要只依赖谓词。
 var ipv4ExplicitBlocks = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),       // "this network"（RFC 1122；含 0.0.0.0）
 	netip.MustParsePrefix("100.64.0.0/10"),   // CGNAT 共享地址空间
 	netip.MustParsePrefix("192.0.0.0/24"),    // IETF 协议赋值
 	netip.MustParsePrefix("192.0.2.0/24"),    // 文档段 TEST-NET-1
@@ -175,6 +184,8 @@ func ipv4Policy(a netip.Addr, o Options) string {
 	case a.IsMulticast():
 		return "组播地址"
 	case a.IsUnspecified():
+		// 仅 0.0.0.0/:: 这两个字面量（"未指定"）；0.0.0.0/8 余下整段走
+		// ipv4ExplicitBlocks，不受 AllowLoopback 影响。
 		if o.AllowLoopback {
 			return ""
 		}
