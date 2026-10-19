@@ -8,8 +8,6 @@
 
 Co-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
-- 文档(changelog)：补 CHANGELOG.md（从 git 历史生成）
-
 ## [v0.8.0] — 2026-10-19
 
 ### 新增(invoke)：接收 toolgate/invoke —— 框架无关的调用链原语落到零依赖底座
@@ -22,8 +20,6 @@ Co-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 迁到本仓后，import 它只多出 oekit/pkg（第一方基座，零第三方依赖）。
 与 permgate 同族（许可判定链 / 不可绕过的调用链，都是「工具调用过程的强制」）。
 本仓仍零第三方依赖：go list -m all 只有自己 + oekit/pkg。
-
-- 文档(changelog)：补 CHANGELOG.md（从 git 历史生成）
 
 ## [v0.7.0] — 2026-10-19
 
@@ -45,8 +41,6 @@ github.com/oagentkit/guardx/bashguard 不再属于本仓模块。
 （已发布物不动，动了会毁掉消费方 go.sum 里的校验和），但那条线**已冻结**，
 不再有后续版本——新代码请用上面的新路径。
 关联 oagentkit/guardx#3
-
-- 文档(changelog)：补 CHANGELOG.md（从 git 历史生成）
 
 - 测试(logredact)：修 ineffassign（append 结果未使用）
 
@@ -72,8 +66,6 @@ github.com/oagentkit/guardx/bashguard 不再属于本仓模块。
 - import 路径**不变**（github.com/oagentkit/guardx/audit 等），下游代码不用改
 - 主模块 go list -m all 只剩自己一行：import logredact 不再把 logx / sh 拖进
   下游的模块图（下游的「核心零依赖」纪律不必再靠豁免名单放行）
-
-- 文档(changelog)：补 CHANGELOG.md（从 git 历史生成）
 
 ## [v0.5.0] — 2026-10-19
 
