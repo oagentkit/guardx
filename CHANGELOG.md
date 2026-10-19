@@ -2,6 +2,21 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.8.0] — 2026-10-19
+
+### 新增(invoke)：接收 toolgate/invoke —— 框架无关的调用链原语落到零依赖底座
+
+自 github.com/oagentkit/toolgate/invoke 迁入（toolgate v0.11.0 起该路径退役）。
+为什么迁：invoke 的包文档自己写着「刻意不携带任何框架类型（如 policy.Op）：
+本包与 policy/toolegate 无耦合」——它是**框架无关的原语**，却被放在带 eino
+家族的重仓里。实测：import 这个包会让消费方的模块图多出 34 个第三方模块
+（eino + sonic + mcp-go 全家），而它自身的 import 面只有 oekit/pkg/errors。
+迁到本仓后，import 它只多出 oekit/pkg（第一方基座，零第三方依赖）。
+与 permgate 同族（许可判定链 / 不可绕过的调用链，都是「工具调用过程的强制」）。
+本仓仍零第三方依赖：go list -m all 只有自己 + oekit/pkg。
+
+- 文档(changelog)：补 CHANGELOG.md（从 git 历史生成）
+
 ## [v0.7.0] — 2026-10-19
 
 ### 重构：audit / bashguard 迁出本仓，回到单 module 零依赖
