@@ -6,7 +6,22 @@
 oagentkit 模块矩阵的 **tier 0 安全层**。与矩阵其余仓的关系：
 `textx`/`runtime` 是零依赖底座，`guardx` 与它们同级；`agent`/`toolgate` 等编排层
 在它们之上消费本仓原语。与 `oekit`（Go 微服务工具链）是两套独立矩阵，
-本仓**依赖** oekit 的 `logx`，不是其子品牌。
+本仓的 `audit` 子模块**依赖** oekit 的 `logx`，不是其子品牌。
+
+## 三个 module，两个零依赖
+
+| module | 包 | 外部依赖 |
+|---|---|---|
+| `github.com/oagentkit/guardx` | `fence` `injectband` `logredact` `egress` `permgate` | **无** |
+| `github.com/oagentkit/guardx/audit` | `audit` | `oekit/logx` |
+| `github.com/oagentkit/guardx/bashguard` | `bashguard` | `mvdan.cc/sh/v3` |
+
+主模块**零外部依赖**：只想脱敏的下游 `import "github.com/oagentkit/guardx/logredact"`
+不会把日志库和 shell 解析器拖进自己的模块图（Go 的模块图会把被依赖模块的
+`require` 一并拉进来）。
+
+两个子模块是**嵌套 module**（子目录自带 `go.mod`），但 **import 路径没变**——
+下游代码一行不用改，只是 `go.mod` 里多一条 require。
 
 ## 包清单
 
@@ -54,9 +69,14 @@ CI 是**薄调用层**：规则本体在 `oagentkit/.github` 的共享工作流�
 各仓 `ci.yml` 只传 `go-version`。改门禁规则只改那一个仓，本仓不动。
 
 ```bash
-go test ./... -cover        # 本机验证
+go test ./... -cover        # 本机验证（主模块）
 gofmt -l . && go vet ./...
+(cd audit && go test ./...)        # 嵌套子模块各自验
+(cd bashguard && go test ./...)
 ```
+
+> 嵌套子模块由 CI 的共享工作流自动发现并测试（build + test -race），
+> 也自动各跑一次 `go mod tidy -diff` 门禁。
 
 > macOS：本机 go build/test 一律带 `CGO_ENABLED=0`（新 SDK 27.0 与 CLT linker 不兼容）。
 
