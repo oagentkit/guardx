@@ -39,7 +39,7 @@ github.com/oagentkit/guardx → fence injectband logredact egress permgate invok
 | `permgate` | ~500 | 能力门禁：`Capability` / `Rule` / `Ruleset` / `Decision`。判定链以 deny 优先于 approval，输出可审计的裁决结构 |
 | `invoke` | ~300 | 工具调用统一契约 + 不可绕过的调用链（构造即保证）。**框架无关**：不携带 eino / policy 的类型 |
 | `logredact` | ~477 | 凭据脱敏：日志与异常面在落盘/外发前的凭据抹除 |
-| `egress` | ~475 | 出站 URL 守卫（SSRF）：scheme 白名单 + 目标地址逐 IP 过策略（回环/RFC1918/链路本地/CGNAT/保留段） |
+| `egress` | ~475 | 出站 URL 守卫（SSRF）：**host** 逐 IP 过策略（回环/RFC1918/链路本地/CGNAT/保留段），**域名直接放行**。⚠️ **不解析 DNS、不校验 scheme** —— 见下方「已知的误用陷阱」 |
 | `fence` | ~284 | **提示注入卫生（数据侧）**：把不可信内容圈进显式数据区，并中和内容中伪造的围栏标记，防其越出数据区取指令待遇 |
 | `injectband` | ~121 | **提示注入卫生（系统侧）**：给系统带外注入打来源标记，并转义 body 内伪造的同形标签，防身份伪造 |
 
@@ -73,6 +73,25 @@ github.com/oagentkit/guardx → fence injectband logredact egress permgate invok
 防护**——真正的 SSRF 防线在调用方的解析层（逐 IP 判定）。本包只提供**逐 IP 策略判定**
 这个原语，不承担解析职责。需要解析后判定的场景（如编排内核的 `netguard`）应自行
 解析后逐 IP 调用。
+
+**`egress` 不校验 scheme。** `Check` 只做 `url.Parse` 后取 `u.Hostname()` 送策略判定，
+**从头到尾没有读过 `u.Scheme`**。实测行为（`egress.Check` 直接跑）：
+
+| URL | 结果 |
+|---|---|
+| `gopher://example.com/x` | **放行**（`nil`） |
+| `dict://example.com:11211/stats` | **放行**（`nil`） |
+| `ftp://example.com/x` | **放行**（`nil`） |
+| `file:///etc/passwd` | 拒绝（`空 host`——该 scheme 没有 host） |
+| `http://127.0.0.1/x` | 拒绝（回环地址） |
+| `http://localhost/x` | 拒绝（localhost 域） |
+
+也就是说：**凡是有 host 的非 http(s) scheme，一律走「域名不解析 → 直接放行」分支**。
+想要 scheme 白名单，**必须由调用方自己判**（在调用 `egress.Check` 之前先看
+`u.Scheme` 是否在允许集合里）。
+
+这不是可以后续补齐的细节，而是**当前实现的真实边界**。把 `egress` 当成
+「URL 安全检查器」用会得到虚假的安全感——它只挡 IP 字面量与 `localhost` 域。
 
 ## 门禁
 
