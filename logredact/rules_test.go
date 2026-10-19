@@ -16,6 +16,9 @@ func TestRulesReturnsCopy(t *testing.T) {
 	before := len(rs)
 	rs[0].Repl = "MUTATED"
 	rs = append(rs, Rule{Name: "extra", Re: regexp.MustCompile(`x`), Repl: "y"})
+	if len(rs) != before+1 {
+		t.Fatalf("append 应作用在副本上，得到 %d 条", len(rs))
+	}
 
 	if len(Rules()) != before {
 		t.Fatalf("Rules() 必须返回副本：追加后内置表长度从 %d 变成 %d", before, len(Rules()))
