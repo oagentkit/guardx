@@ -1,13 +1,13 @@
 # AGENTS.md — oagentkit/guardx
 
-> 安全围栏，5 个包：`fence` `injectband` `logredact` `egress` `permgate`
+> 安全围栏，6 个包：`fence` `injectband` `logredact` `egress` `permgate` `invoke`
 > module：`github.com/oagentkit/guardx` · org：[oagentkit = Open Agent Kit](https://github.com/oagentkit)
 > 矩阵分层：**tier 0（基础层）**
 
 ## 本仓包含
 
 ```
-fence/  injectband/  logredact/  egress/  permgate/
+fence/  injectband/  logredact/  egress/  permgate/  invoke/
 ```
 
 **本仓是 1 个 Go module、1 条版本线、零外部依赖。**
@@ -59,6 +59,10 @@ fence/  injectband/  logredact/  egress/  permgate/
   不执行命令。**不得改成 exec 执行后再判断**。
 - **`permgate`** —— 许可判定的默认值必须是**拒绝**，白名单显式开。
   新增能力时默认拒绝，不要用「未配置即放行」。
+- **`invoke`** —— 工具调用的**统一契约与不可绕过的调用链**：链的构造即保证
+  （构造器不给出绕过路径）。它刻意**不携带任何框架类型**（不绑 eino / policy 的
+  类型），审计语义由各 Stage 自己从 Name/Server/Args 读——所以它是**框架无关的原语**，
+  放本仓而不是工具治理仓。
 
 ### 错误处理
 

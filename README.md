@@ -14,7 +14,7 @@ oagentkit 模块矩阵的 **tier 0 安全层**。与矩阵其余仓的关系：
 本仓是 **1 个 Go module、1 条版本线、零外部依赖**：
 
 ```
-github.com/oagentkit/guardx → fence injectband logredact egress permgate
+github.com/oagentkit/guardx → fence injectband logredact egress permgate invoke
 ```
 
 主模块**零外部依赖**：只想脱敏的下游 `import "github.com/oagentkit/guardx/logredact"`
@@ -37,6 +37,7 @@ github.com/oagentkit/guardx → fence injectband logredact egress permgate
 | 包 | 行数 | 职责 |
 |---|---|---|
 | `permgate` | ~500 | 能力门禁：`Capability` / `Rule` / `Ruleset` / `Decision`。判定链以 deny 优先于 approval，输出可审计的裁决结构 |
+| `invoke` | ~300 | 工具调用统一契约 + 不可绕过的调用链（构造即保证）。**框架无关**：不携带 eino / policy 的类型 |
 | `logredact` | ~477 | 凭据脱敏：日志与异常面在落盘/外发前的凭据抹除 |
 | `egress` | ~475 | 出站 URL 守卫（SSRF）：scheme 白名单 + 目标地址逐 IP 过策略（回环/RFC1918/链路本地/CGNAT/保留段） |
 | `fence` | ~284 | **提示注入卫生（数据侧）**：把不可信内容圈进显式数据区，并中和内容中伪造的围栏标记，防其越出数据区取指令待遇 |
