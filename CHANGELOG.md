@@ -2,6 +2,31 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.6.0] — 2026-10-19
+
+### 新增(logredact)!：规则表可组合 + 保定位线索掩码档；audit/bashguard 拆嵌套模块
+
+修 #3。
+一、规则表公开且可组合
+- Rule 公开（Name/Re/Repl/Style/Keep/Group），Rules() 给内置表副本
+- RedactWith(s, extra) / NewRedactor(extra)：下游可追加自己的凭据形态
+- 应用顺序明确：**先内置、后扩展**（内置更精确，先跑它扩展才拿不到原始凭据）
+- 扩展表里 Re=nil 的规则跳过而不是 panic
+二、补「保定位线索的不可逆掩码」档
+- MaskHint / MaskHintWith：保留首尾各 Keep 字符，中间恒为固定长度星号
+- 保留位**封顶**、输出长度**固定** → 不随原值长度泄露信息
+- 长度不足 keep*4 时全量打码（留 8 藏 1 等于没藏）
+- Rule.Style=MaskStyleHint + Group 圈出凭据本体，保留额度才花在凭据上
+- 与全量打码是**不同档**：前者认不出是哪一条，后者认得出但还原不了
+三、依赖面收干净（主模块零外部依赖）
+- audit → 嵌套模块 github.com/oagentkit/guardx/audit（依赖 oekit/logx）
+- bashguard → 嵌套模块 github.com/oagentkit/guardx/bashguard（依赖 mvdan.cc/sh）
+- import 路径**不变**（github.com/oagentkit/guardx/audit 等），下游代码不用改
+- 主模块 go list -m all 只剩自己一行：import logredact 不再把 logx / sh 拖进
+  下游的模块图（下游的「核心零依赖」纪律不必再靠豁免名单放行）
+
+- 文档(changelog)：补 CHANGELOG.md（从 git 历史生成）
+
 ## [v0.5.0] — 2026-10-19
 
 - 杂务(deps)：依赖地板对齐远端最新（logx v0.7.1） (#13)
