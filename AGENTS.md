@@ -1,13 +1,13 @@
 # AGENTS.md — oagentkit/guardx
 
-> 安全围栏，6 个包：`fence` `injectband` `logredact` `egress` `permgate` `invoke`
+> 安全围栏，7 个包：`fence` `injectband` `logredact` `egress` `permgate` `invoke` `toolfail`
 > module：`github.com/oagentkit/guardx` · org：[oagentkit = Open Agent Kit](https://github.com/oagentkit)
 > 矩阵分层：**tier 0（基础层）**
 
 ## 本仓包含
 
 ```
-fence/  injectband/  logredact/  egress/  permgate/  invoke/
+fence/  injectband/  logredact/  egress/  permgate/  invoke/  toolfail/
 ```
 
 **本仓是 1 个 Go module、1 条版本线、零外部依赖。**
@@ -63,6 +63,13 @@ fence/  injectband/  logredact/  egress/  permgate/  invoke/
   （构造器不给出绕过路径）。它刻意**不携带任何框架类型**（不绑 eino / policy 的
   类型），审计语义由各 Stage 自己从 Name/Server/Args 读——所以它是**框架无关的原语**，
   放本仓而不是工具治理仓。
+- **`toolfail`** —— 工具失败的**分类与处置契约**。三条硬规则：
+  - **不可分类 = 不可重试**（保守缺省）：判据缺失时两种误判成本不对称——
+    误判可重试是把一次失败放大成 N 次，还可能重复施加副作用。
+  - **重发安全与重试价值是两个正交维度**：超时值得重试，但服务端可能已执行，
+    原样重发即重复施加副作用。只看「可重试」的调用方必然在这两种误判里选一个。
+  - **策略是数据不是 if 链**：类别 → 处置的映射写进单源策略表，改表必然改到
+    契约测试。
 
 ### 错误处理
 
