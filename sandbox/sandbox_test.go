@@ -24,7 +24,7 @@ func (f *fakeProvider) Exec(ctx context.Context, req Request) (Outcome, error) {
 
 // TestLevelOrdering 档位序即强弱。
 func TestLevelOrdering(t *testing.T) {
-	if !(LevelNone < LevelProcess && LevelProcess < LevelOS && LevelOS < LevelMachine) {
+	if LevelNone >= LevelProcess || LevelProcess >= LevelOS || LevelOS >= LevelMachine {
 		t.Error("档位序应递增：none < process < os < machine")
 	}
 }
