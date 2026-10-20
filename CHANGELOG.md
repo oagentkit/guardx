@@ -4,11 +4,11 @@
 
 ## [v0.8.2] — 2026-10-20
 
-- [round-1] fix(go): tier0 基础包地板降到 go 1.24.0，CI go-version 同步到 1.24 (#7)
+- [round-1] fix(go): tier0 基础包地板降到 go 1.24.0，CI go-version 同步到 1.24
 
 ## [v0.8.1] — 2026-10-20
 
-### 修复(docs)：egress 不校验 scheme——改为实际行为并写明误用边界 (#4)
+### 修复(docs)：egress 不校验 scheme——改为实际行为并写明误用边界
 
 Co-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
@@ -73,11 +73,11 @@ github.com/oagentkit/guardx/bashguard 不再属于本仓模块。
 
 ## [v0.5.0] — 2026-10-19
 
-- 杂务(deps)：依赖地板对齐远端最新（logx v0.7.1） (#13)
+- 杂务(deps)：依赖地板对齐远端最新（logx v0.7.1）
 
 ## [v0.4.1] — 2026-10-19
 
-### 修复(egress)：补 0.0.0.0/8 拦截，堵 this network 段 SSRF 缺口 (#2)
+### 修复(egress)：补 0.0.0.0/8 拦截，堵 this network 段 SSRF 缺口
 
 netip 的 IsUnspecified() 只匹配全零这一个地址，不是 0.0.0.0/8 的判定，
 而该段此前不在 ipv4ExplicitBlocks 里——0.1.2.3 / 0.255.255.255 一类
@@ -121,7 +121,7 @@ AGENTS.md 立了「安全语义不可弱化」一节：egress 不得加 LLM URL 
 permgate 默认拒绝、bashguard 不得改成 exec 后判。
 门禁：go build / go vet / go test -race 6 包全绿，gofmt 干净。
 
-### 修复(agents)：把熔断从 runtime 归属里拆出来，指向 oekit/concurrency/breaker (#1)
+### 修复(agents)：把熔断从 runtime 归属里拆出来，指向 oekit/concurrency/breaker
 
 `AGENTS.md` 的归属表写的是：
     | 并发/流控/熔断/事件总线 | `github.com/oagentkit/runtime` |
