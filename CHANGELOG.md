@@ -2,6 +2,10 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.8.2] — 2026-10-20
+
+- [round-1] fix(go): tier0 基础包地板降到 go 1.24.0，CI go-version 同步到 1.24 (#7)
+
 ## [v0.8.1] — 2026-10-20
 
 ### 修复(docs)：egress 不校验 scheme——改为实际行为并写明误用边界 (#4)
