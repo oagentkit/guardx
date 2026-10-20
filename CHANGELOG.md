@@ -4,7 +4,40 @@
 
 ## [v0.8.2] — 2026-10-20
 
-- [round-1] fix(go): tier0 基础包地板降到 go 1.24.0，CI go-version 同步到 1.24
+### 修复(go)：tier0 基础包地板降到 go 1.24.0，CI go-version 同步到 1.24
+
+本仓是 tier0 基础包（零重量级第三方地板，可被零依赖核心安全依赖），
+但 go 指令声明的是 1.26.0——地板被无谓抬高，把 Go 1.24 的用户挡在门外。
+## 依据
+**依赖链全是 1.24 的包**：本仓唯一依赖 `github.com/oekit/pkg v0.16.0`（go 1.24.0），
+依赖链上没有任何要求更高版本的包。
+**代码本身兼容 1.24**：用真实 go1.24.0 工具链（`GOTOOLCHAIN=go1.24.0`）
+build + test 全绿——不是推断，是实跑。
+**门槛是 go 指令，不是 toolchain**（编译器实证）：
+- `go 1.28.0` → 被拒：`go.mod requires go >= 1.28.0 (running go 1.27.1; GOTOOLCHAIN=local)`
+- `go 1.24.0` + `toolchain go1.28.0` → 通过
+## toolchain 行的取舍：删掉
+toolchain **不构成门槛**（上面已实证），但 `toolchain go1.27.2` 会让 `go` 命令
+**自动下载** 1.27.2，与「最低支持版本是 1.24」的精神相悖——用户以为自己用
+1.24 在编译，工具链却被悄悄换成了 1.27.2。故删除该行。
+这也与基座 org 的做法一致：oekit 的 pkg / concurrency / core / logx / metrics /
+kitx 六个基础仓一律是 `go 1.24.0` + **无 toolchain 行**。
+## 改动
+- `go.mod`：`go 1.26.0` → `go 1.24.0`；删 `toolchain go1.27.2`
+- `.github/workflows/ci.yml`：`go-version: '1.26'` → `'1.24'`
+CI 的 go-version 与 go.mod 的 go 指令**成对**——这是跨层通用纪律，不因本次
+降级而放松。CI 用高版本构建、go.mod 承诺低版本时，CI 全绿但用户按最低版本
+编译失败，门禁绿了而承诺没兑现。
+## 未受影响
+- `require` 段（依赖地板钉）**未动**，`go mod tidy -diff` 零差异、go.sum 未变
+- 内部 require 版本不变 ⇒ 不影响任何下游的 MVS
+- 对外产物（versions.json / llms.txt）不记录 go 版本，无需刷新
+## 验证
+- `GOTOOLCHAIN=go1.24.0 go build ./...` → exit 0
+- `GOTOOLCHAIN=go1.24.0 go test ./...` → 全绿
+- `go mod tidy -diff` → 零差异
+门禁见 oagentkit/matrix-tools PR：`scripts/verify_go_floor.py`
+（tier0 必须 1.24.x + CI go-version 与 go.mod 成对，判据独立不复用生成器）。
 
 ## [v0.8.1] — 2026-10-20
 
@@ -75,6 +108,19 @@ github.com/oagentkit/guardx/bashguard 不再属于本仓模块。
 
 - 杂务(deps)：依赖地板对齐远端最新（logx v0.7.1）
 
+matrix-tools 的 verify_dep_floors.py 首次全矩阵扫描查出：43 条第一方依赖里
+28 条落后，横跨 11 个仓；本仓是其中之一。
+所升版本与本仓原钉版本相比源码零改动，逐版实测确认：
+- textx v0.3.0→v0.4.0 / obs v0.4.1→v0.5.0 / runtime v0.5.0→v0.6.0 /
+  mcpkit v0.5.1→v0.6.0  全树逐字节相同（diff -rq 退出码 0）
+- oekit/pkg v0.14.0→v0.15.1  仅新增 urlguard 包（纯标准库，pkg 的 go.mod
+  连 require 块都没有，零新增三方依赖）
+- oekit/concurrency v0.17.0→v0.17.1  仅三个文档文件
+- oekit/logx v0.7.0→v0.7.1  仅 CI 配置与文档
+无 API 变更、无兼容风险。
+本地门禁：go mod tidy -diff 无输出 / go build / go vet / gofmt / go test -race 全通过。
+
+
 ## [v0.4.1] — 2026-10-19
 
 ### 修复(egress)：补 0.0.0.0/8 拦截，堵 this network 段 SSRF 缺口
@@ -135,7 +181,27 @@ permgate 默认拒绝、bashguard 不得改成 exec 后判。
 
 - 杂务(deps)：oekit 三模块升至最新（pkg v0.13.0 / concurrency v0.12.0 / logx v0.7.0）
 
+拿到上游新增能力：
+- concurrency #22 RetryableWithHeaders：403 头感知判定（次级限流 / 主限流耗尽）
+- concurrency #23 FanInLimit：受限并发扇出
+- concurrency #24 WithTokenClock、#21 Lockout（keyed lockout/penalty）
+- logx #12 TraceHandler：给裸 slog.Handler 注入 trace_id
+破坏性变更核对（均无影响）：
+- logx v0.7.0 ParseLogLevel 签名改为 (Level, error) —— 我们未使用该函数
+- concurrency v0.9.0 的 Slot.Panicked 废弃 —— rag 已迁到 Slot.Err + errors.As
+门禁：go build / go vet / go test -race 全绿。
+
+
 - CI：接入 org 共享门禁（规则本体在 oagentkit/.github）
 
 - 文档(agents)：补 injectband 到包清单与安全语义硬规则
+
+7b2a90b 加包时改的 AGENTS.md 被后续重写（f5cb3a9 的归属表版）覆盖，本 commit 在新版基础上补漏，不回退重写。
+三处：标题包数 6→7、本仓包含目录补 injectband/、安全语义硬规则补 injectband 条。
+硬规则强调 fence 与 injectband 封相反方向且不可互替——只做 fence 时攻击者不必逃出数据区，写一个像系统注入的标签即可抬升身份。删除任一个都会开真实的注入面。
+
 - 文档：修正 README/AGENTS.md —— 原为 agent-harness 的整份复制残留
+
+建仓时从 agent-harness 复制了文档没改，导致：README 标题写着「agent-harness · 多智能体编排通用内核」、包清单列的是 agent-harness 的 20 个包（本仓实际 7 个）、AGENTS.md 通篇引用本仓不存在的 make check 与 harness-* 门禁规则。
+后果不只是文档不准：AGENTS.md 是 AI 代理的工作纪律来源，它让后续在本仓干活的代理按一套不存在的门禁和错误的边界（宿主仓禁令、运维词表）做判断。
+重写为 guardx 自己的内容：包清单、提示注入两个方向的互补关系、egress 不解析 DNS 的误用陷阱、机制与策略内容的分界（这是 tier 0 特有纪律，agent-harness 那套「资产归宿主」不适用）。
