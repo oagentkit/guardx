@@ -14,7 +14,7 @@ oagentkit 模块矩阵的 **tier 0 安全层**。与矩阵其余仓的关系：
 本仓是 **1 个 Go module、1 条版本线、零外部依赖**：
 
 ```
-github.com/oagentkit/guardx → fence injectband logredact egress permgate invoke toolfail
+github.com/oagentkit/guardx → fence injectband logredact egress permgate invoke toolfail sandbox
 ```
 
 主模块**零外部依赖**：只想脱敏的下游 `import "github.com/oagentkit/guardx/logredact"`
@@ -43,6 +43,7 @@ github.com/oagentkit/guardx → fence injectband logredact egress permgate invok
 | `egress` | ~475 | 出站 URL 守卫（SSRF）：**host** 逐 IP 过策略（回环/RFC1918/链路本地/CGNAT/保留段），**域名直接放行**。⚠️ **不解析 DNS、不校验 scheme** —— 见下方「已知的误用陷阱」 |
 | `fence` | ~284 | **提示注入卫生（数据侧）**：把不可信内容圈进显式数据区，并中和内容中伪造的围栏标记，防其越出数据区取指令待遇 |
 | `injectband` | ~121 | **提示注入卫生（系统侧）**：给系统带外注入打来源标记，并转义 body 内伪造的同形标签，防身份伪造 |
+| `sandbox` | ~630 | **执行沙箱的档位语义与后端协议**：`Level`（none/process/os/machine，序即强弱）+ `Provider` + `Registry`。**选不到满足档位的后端即拒绝，绝不降级** |
 
 > 「行数」口径 = 生产代码 + 测试代码总和。
 >
