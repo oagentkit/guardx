@@ -100,6 +100,10 @@ fence/  injectband/  logredact/  egress/  permgate/  invoke/  toolfail/  sandbox
   - **帧格式用长度前缀不用行分隔**：工具输出可能含换行，行分隔会被内容切断。
   - **版本不匹配即响亮失败**：静默错配的症状是「字段读成了另一个意思」——那是最
     难查的一类。
+  - **启动通道与调用通道必须是两条连接**：共用一条则「读到的这帧是 Start 还是
+    Response」只能靠猜——两者 JSON 形状不同（Start 有 program/bindings，
+    Request/Response 有 tool/id），猜错的后果是「字段读成了另一个意思」。
+    故四个角色各给一个类型：父 `Starter`/`Server`、子 `Runner`/`Client`。
 
 ### 错误处理
 
