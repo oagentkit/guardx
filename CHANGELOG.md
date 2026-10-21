@@ -2,6 +2,95 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.10.0] — 2026-10-21
+
+### 新增(sandbox)：预算面补 MaxMemory + 可选能力面 Capable
+
+承接 #17（下游 agent-harness 侧的执行沙箱多后端需求）。
+## 缺口
+`Budget` 只有三项（墙钟 / 调用数 / 输出字节），**没有内存这一项** ⇒ 宿主**无从要求**
+内存上限。而进程内解释器后端**兜不住内存**（Go 运行时没有「只给一个 VM 限内存」的
+开关，解释器本身也没有内存限制 API）——于是「这组预算我兜不兜得住」这件事
+**两端都说不出来**：一个兜得住的后端与一个兜不住的，在选择时长得一样。
+后果不是理论上的：模型写的一段快速分配的程序，能在 deadline 到点**之前**把宿主进程
+内存吃光，宿主被 OOM 杀掉——而宿主进程里还跑着编排引擎、事件总线、别的环节。
+## 三处改动
+### 1. `Budget` 补第四项
+```go
+MaxMemory int64 // 内存上限（字节）。0 = 不要求。
+```
+**为什么不新增一维 `Level`**：想加一维「资源兜底（Containment）」——子进程 + rlimit
+这个后端在现有阶梯上无处安放：能力面是解释器白名单（同 LevelProcess），资源面是内核
+兜底（更强），文件/网络面未裁剪（比 LevelOS 弱）——一维说不通。
+但改用「兜底是**预算项**」之后，一维阶梯保持成立：`Level` 继续管**能力面**（安全
+维度），**资源兜底**是正交的一维，而它**本来就有一个位置**——`Budget` 就是「这次执行
+要多少资源」的载体，内存只是漏了第四个。
+### 2. 新增可选能力面 `Capable`
+```go
+type Capable interface {
+    Supports(b Budget) bool
+}
+```
+**刻意是可选接口而不是 `Provider` 的新方法**：`Provider` 已在 v0.9.0 发布，
+给它加方法是**破坏性变更**。可选接口让既有实现**编译期零改动**，且缺省语义天然
+落在**保守的一侧**：
+    不实现 Capable ⇒ 只兑现基本三闸、**不兑现内存**
+    ⇒ 要求 MaxMemory 的请求不被选中 ⇒ fail closed
+方向与安全语义一致：漏声明 ⇒ 少能力，不是多豁免。
+另附 `CapableFunc` 适配器与 `SupportsBasic` / `SupportsAll` 两个常用实现，
+让后端不必为一个判定写具名类型。
+### 3. `Resolve` 按支持面过滤
+```go
+func (r *Registry) Resolve(min Level, budget ...Budget) (Provider, error)
+```
+**budget 是可选参数**：把 budget 加成必填参数是破坏性变更；可选参数让既有调用点
+（`Resolve(min)`）**编译期零改动、行为逐字不变**——省略 budget 时只看档位，
+与旧版一致。
+兜不住预算的后端**不被选中**（不是选中后失败）：这与「档位不足」的处置同一条纪律，
+但**成因不同、处置也不同**——档位不足可以「把要求降一档」，兜不住预算只能
+「换执行模型」或「放弃这项要求」，降档解决不了它。
+多组预算**逐项取要求更高者**（求和是配额语义，这里是上限语义）。
+`Execute` 内部用 `req.Budget` 过滤——请求里的预算要求**同时用于选后端**，
+否则「要求了内存兜底而后端兜不住」只在执行期暴露，而选后端这步本可以拦下它。
+既有调用的 `req.Budget.MaxMemory` 是 0（新字段零值 = 不要求），故**行为逐字不变**。
+## 兼容性
+- `Budget` 加字段：源码兼容（无键字面量的用法需改，属极少数）；
+- `Capable` 是**新增可选接口**：既有 `Provider` 实现零改动；
+- `Resolve` 行为变化：**只影响「要求了 MaxMemory 而后端兜不住」这一种情形**——
+  此前这种要求根本无从表达，故无行为漂移；
+- 不引入任何新依赖（主模块「零外部依赖、`go list -m all` 只有一行」的门禁不受影响）。
+## 验收
+- 要求 `MaxMemory` 而候选后端不实现 `Capable` ⇒ `Resolve` 返回 `ErrNoProvider`
+  （**不是选中后失败**）；
+- 实现了 `Capable` 且返回 true 的后端被选中，且仍取**最弱**满足者；
+- 既有 `Provider` 实现编译期零改动、行为逐字不变；
+- `go list -m all` 仍只有本模块一行。
+**下游实跑**：agent-harness（真实既有下游，其 `ptc` 就是不实现 `Capable` 的后端）
+用本分支替换依赖后**编译零改动、全量测试全绿**——`ptc.Provider` 三个方法一个没动。
+## 门禁
+```
+go build / vet / test -race   ✅ 8 包全绿
+sandbox 覆盖率                100.0%
+全仓总覆盖率                  96.7%
+gofmt -l .                    ✅ 空
+golangci-lint                 ✅ 0 issues
+go mod tidy -diff             ✅ 无漂移
+```
+
+- 文档(AGENTS)：补「发版顺序」小节，指向 org CONTRIBUTING 单一副本
+
+13 个业务仓的 AGENTS.md 此前对发版顺序零覆盖（只有 textx 有个
+「### 版本与发版」标题，但里面只讲 SemVer 与 module 路径），
+发版顺序只写在 org 规则仓的 .github/CONTRIBUTING.md 里，单仓读者看不到。
+本次只加**指针 + 本仓相关提醒**，runbook 本体保持**单一副本**
+（CONTRIBUTING §发版），避免 13 份副本各自漂移。
+覆盖四条：
+- CHANGELOG.md 由 matrix-tools/scripts/gen_changelogs.py 从 git 历史生成，不要手改
+- tag 必须落在 CHANGELOG 提交之后（下游 go get 拿到的是 tag 快照）
+- 警告：无参重生成会吞掉待发版段，--next-version 是唯一能产出待发版段的开关
+- 本仓相关提醒（见正文）
+
+
 ## [v0.9.0] — 2026-10-21
 
 ### 新增(sandbox)：新增执行沙箱的档位语义与后端协议（自 agent-harness 下沉）
