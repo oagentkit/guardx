@@ -7,7 +7,7 @@
 ## 本仓包含
 
 ```
-fence/  injectband/  logredact/  egress/  permgate/  invoke/  toolfail/  sandbox/  sandbox/wire/
+fence/  injectband/  logredact/  egress/  permgate/  invoke/  toolfail/  sandbox/  wire/
 ```
 
 **本仓是 1 个 Go module、1 条版本线、零外部依赖。**
