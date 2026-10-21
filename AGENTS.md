@@ -99,6 +99,23 @@ fence/  injectband/  logredact/  egress/  permgate/  invoke/  toolfail/  sandbox
 - 函数选项模式命名 `XxxOption`（禁止裸 `Option`，多包 co-import 会冲突）。
 - 导出符号 PascalCase + godoc 注释；包文档放 `doc.go`。
 
+### 发版顺序
+
+本仓的 `CHANGELOG.md` 由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，
+**不要手改**。发版顺序的**单一副本**见 org 规则仓
+[CONTRIBUTING §发版](https://github.com/oagentkit/.github/blob/main/CONTRIBUTING.md#发版)：
+**预写待发版段 → 提交 CHANGELOG.md → 在那个提交上打 annotated tag**。
+tag 必须落在 CHANGELOG 提交**之后** —— 下游 `go get` 拿到的是 tag 快照，
+快照里的 CHANGELOG.md 若缺自己那一段，发布说明就是残缺的。
+
+⚠️ 无参重生成 CHANGELOG 会**吞掉待发版段**：生成器只按已存在的 tag 切段，
+`--next-version` 是唯一能产出待发版段的开关。**预写之后、打 tag 之前，
+不要跑无参重生成。**
+
+本仓已有 4 个 CHANGELOG-at-tag 欠账（`guardx@v0.6.0`/`v0.7.0`/`v0.8.0`/`v0.8.1`，
+清单见 `matrix-tools/scripts/changelog_tag_debt.json`）—— **反面例子，不是范例**；
+另：`audit/v0.1.0`/`bashguard/v0.1.0` 是已冻结的嵌套子模块线，**不是本仓版本线**。
+
 ## 明确不属于本仓的
 
 | 能力 | 归属 |
