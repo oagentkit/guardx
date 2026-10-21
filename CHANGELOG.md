@@ -2,6 +2,18 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.13.1] — 2026-10-21
+
+- 杂务(deps)：oekit/pkg 依赖地板抬到 v0.20.0
+
+本仓只用 oekit/pkg/errors 的 4 个函数（New / As / Is / Wrap），它们在
+v0.18.0 → v0.20.0 之间是同型透传（New 是 stdlib 的 shim，As/Is 是
+stdlib 透传，Wrap 是 nil-safe 的包装）——故这是纯地板追平，无行为差异。
+矩阵的依赖地板时效门禁（verify_dep_floors.py）会把它报出来；该门禁在 CI 上
+是报告模式（continue-on-error），不阻断合并，但漂移清单应尽量干净。
+门禁自检：go build / vet / test ✅ 9 包全绿，gofmt ✅，go mod tidy ✅
+
+
 ## [v0.13.0] — 2026-10-21
 
 ### 修复(wire)：wire 移到仓根——矩阵的包路径规则不支持仓内包的子包
