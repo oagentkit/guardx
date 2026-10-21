@@ -1,13 +1,13 @@
 # AGENTS.md — oagentkit/guardx
 
-> 安全围栏，8 个包：`fence` `injectband` `logredact` `egress` `permgate` `invoke` `toolfail` `sandbox`
+> 安全围栏，9 个包：`fence` `injectband` `logredact` `egress` `permgate` `invoke` `toolfail` `sandbox` `wire`
 > module：`github.com/oagentkit/guardx` · org：[oagentkit = Open Agent Kit](https://github.com/oagentkit)
 > 矩阵分层：**tier 0（基础层）**
 
 ## 本仓包含
 
 ```
-fence/  injectband/  logredact/  egress/  permgate/  invoke/  toolfail/  sandbox/
+fence/  injectband/  logredact/  egress/  permgate/  invoke/  toolfail/  sandbox/  sandbox/wire/
 ```
 
 **本仓是 1 个 Go module、1 条版本线、零外部依赖。**
@@ -84,6 +84,22 @@ fence/  injectband/  logredact/  egress/  permgate/  invoke/  toolfail/  sandbox
     **保守的一侧**——漏声明得到的是「兜不住」，不是「兜得住」。方向与安全语义一致。
   - **`Provider` 不得加方法**：它已在 v0.9.0 发布，加方法是破坏性变更。能力扩展走
     **可选接口**（`Capable`），既有实现编译期零改动。
+- **`wire`** —— 跨进程调用协议（`sandbox/wire`）。硬规则：
+  - **协议只有一份**：后端只实现「怎么起这个进程」与「怎么执行这个程序」，
+    帧格式与请求/响应语义一律用本包。协议各写一遍 ⇒ 换个后端就得换一套。
+  - **失败分类跨进程同源**：`kind` 取 `toolfail` 的分类，**不得**退化成自由字符串
+    ——分类一旦退化成字符串，父侧就分不清「可重试」与「永久拒绝」，重试策略随之
+    瞎掉。`toolfail` 与 `sandbox` 同在本仓，**同层引用，无跨仓依赖**。
+  - **预算的权威在父侧**：调用数与输出字节数由父侧记账。子进程自己记账可以
+    **谎报**自己没超预算。
+  - **在途调用有硬上限**：总量预算（MaxCalls）拦不住「瞬间发起十万次并发调用」
+    ——那时它们都还没返回，父侧已被 goroutine 淹没。超出即回「超限」帧，
+    **不排队等**（排队等就等于没有上限）。
+  - **取消传播靠管道关闭**：父侧 ctx 取消 → 关连接 → 子侧读到 EOF → 在途全部失败。
+    不需要单独的取消帧——**管道关闭本身就是最强的取消信号**。
+  - **帧格式用长度前缀不用行分隔**：工具输出可能含换行，行分隔会被内容切断。
+  - **版本不匹配即响亮失败**：静默错配的症状是「字段读成了另一个意思」——那是最
+    难查的一类。
 
 ### 错误处理
 
