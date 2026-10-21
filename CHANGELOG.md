@@ -2,6 +2,32 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.13.0] — 2026-10-21
+
+### 修复(wire)：wire 移到仓根——矩阵的包路径规则不支持仓内包的子包
+
+## 为什么要移
+矩阵的**包路径唯一构造规则**是「`github.com/{org}/{repo}/{包名末段}`，中间层目录丢弃」
+（matrix-tools/scripts/matrix_paths.py 的 new_import_path）。故：
+- `llm/port` 的 importPath 是 `github.com/oagentkit/llm/port`——它在 **llm 仓根下**
+  （`llm/port/`），`llm/` 只是旧单仓的组织目录残留；
+- 而 `sandbox/wire` 若留在 `guardx/sandbox/wire/`，importPath 就是
+  `github.com/oagentkit/guardx/sandbox/wire`——**与规则冲突**（规则要求
+  `github.com/oagentkit/guardx/wire`）。
+矩阵的模型是「一个仓 N 个**平级**包」，不支持「仓内包的子包」。而 guardx 的
+`sandbox` 本身已是一个平级包，`sandbox/wire` 就成了它的子包。
+## 实证
+移之前 matrix-tools 的 import 路径对账门禁报红：
+    ❌ guardx/wire: 矩阵登记了这个包，仓里却没有对应的 .go 目录
+（该门禁只扫仓根下一层的包目录——嵌套第二层的目录它看不到。）
+## 改动
+- `sandbox/wire/` → `wire/`（git mv，保留历史）
+- AGENTS.md 目录清单、README 包表同步
+import 路径随之从 `github.com/oagentkit/guardx/sandbox/wire` 变为
+`github.com/oagentkit/guardx/wire`——**这是 breaking**（公开 API 路径变更），
+但 wire 才刚发版（v0.11.0 / v0.12.0），下游尚未接入，此刻改代价最小。
+## 门禁
+
 ## [v0.12.0] — 2026-10-21
 
 ### 新增(wire)：补齐执行生命周期——Start / Result 帧与「两条通道 × 四个角色」
