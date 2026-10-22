@@ -6,8 +6,10 @@
 //	alwaysAsk 硬阻断段 → disallowed/project-deny 仍压过「问」（被硬禁的
 //	  工具不能退化成「弹窗一点就能跑」）
 //	alwaysAsk 会话授权段 → 命中即放行（钥匙是本会话的授权，不看模式）
+//	alwaysAsk 只读拦截段 → 只读档的非只读工具直接拒（不给「问」的机会）
 //	disallowed → deny
 //	project deny → deny
+//	只读拦截 → deny（只读档的非只读工具直接拒——「禁」压过「问」）
 //	yolo → 放行（alwaysAsk 与一切「禁」都在它前面——yolo 跳过的是「问」不是「禁」）
 //	project ask → ask
 //	只读模式 → 只读工具放行、其余拦下
@@ -15,6 +17,11 @@
 //	预批钩子 → allow（WebFetch URL 白名单类）
 //	配置白名单 → allow
 //	兜底 → 只读工具放行，其余 ask
+//
+// 「只读拦截」段是「只读模式」段的前置影子：只读档对非只读工具是「禁」不是
+// 「问」——它必须压过 alwaysAsk 与 project ask 两处「问」，否则只读退化成
+// 「换个姿势问」（issue #24）。它与后段同 RuleID/Reason，审计口径不变；
+// mode 之间互斥，故它与 yolo 段无交集。
 //
 // 与 agentkit policy（操作审计门：四模式裁决矩阵）正交：policy 裁「业务操作
 // 该不该做」，permgate 裁「这次工具调用要不要人确认」。
@@ -113,7 +120,7 @@ func (s *Service) Check(ctx context.Context, tool string, input any, mode Mode, 
 	case cap.RequiresUserInteraction:
 		return s.checkUserInteraction(tool, input)
 	case cap.AlwaysAsk:
-		return s.checkAlwaysAsk(tool, input)
+		return s.checkAlwaysAsk(tool, input, mode, cap)
 	default:
 		return s.checkStandard(ctx, tool, input, mode, cap)
 	}
@@ -135,14 +142,35 @@ func (s *Service) checkUserInteraction(tool string, input any) Decision {
 
 // checkAlwaysAsk 逐次确认工具：先走硬阻断，再看会话授权，最后问——
 // 不可被模式/白名单放行。
-func (s *Service) checkAlwaysAsk(tool string, input any) Decision {
+//
+// 只读拦截插在会话授权之后、ask 之前：只读档对非只读工具是「禁」不是「问」
+// ——否则只读退化成「换个姿势问」（issue #24）。会话授权不在其列：那是用户
+// 已经给出的决定（放行），不是一次「问」——保持「不看模式」的既有语义。
+func (s *Service) checkAlwaysAsk(tool string, input any, mode Mode, cap Capability) Decision {
 	if d, hit := s.hardDeny(tool, input); hit {
 		return d
 	}
 	if matchRules(s.sessionRuleSet().Allow, tool, input) {
 		return decision(Allow, "rule.session.allow", "本会话已授权: "+tool)
 	}
+	if readonlyWrite(mode, cap) {
+		return readonlyDeny(tool)
+	}
 	return decision(Ask, "tool.alwaysAsk", "工具要求逐次确认: "+tool)
+}
+
+// readonlyWrite 只读档里的非只读工具（写入类）——只读模式对它是「禁」。
+//
+// 判据与 checkStandard 的只读段同源：只有 cap.ReadOnly 的工具在只读档放行。
+// mode 之间互斥，故本判据与 yolo 段永不同真。
+func readonlyWrite(mode Mode, cap Capability) bool {
+	return mode == ModeReadOnly && !cap.ReadOnly
+}
+
+// readonlyDeny 只读拦截的裁决（单源）：与 checkStandard 只读段的 Deny 分支
+// 同 RuleID/Reason——审计口径不因拦截位次而变。
+func readonlyDeny(tool string) Decision {
+	return decision(Deny, "mode.read_only", "只读模式拦下写入: "+tool)
 }
 
 // hardDeny 硬阻断单源（checkUserInteraction/checkAlwaysAsk/checkStandard 三段
@@ -168,6 +196,10 @@ func (s *Service) checkStandard(ctx context.Context, tool string, input any, mod
 		return decision(Deny, "rule.disallowedTools", "工具被显式禁用: "+tool)
 	case s.matchRules(&s.ProjectRules.Deny, tool, input):
 		return decision(Deny, "rule.project.deny", "项目规则拒绝: "+tool)
+	case readonlyWrite(mode, cap):
+		// 只读拦截：只读档对非只读工具是「禁」不是「问」——必须压过
+		// project ask，否则只读退化成「换个姿势问」（issue #24）。
+		return readonlyDeny(tool)
 	case mode == ModeYolo:
 		return decision(Allow, "mode.yolo", "yolo 模式直通")
 	case s.matchRules(&s.ProjectRules.Ask, tool, input):
@@ -176,7 +208,7 @@ func (s *Service) checkStandard(ctx context.Context, tool string, input any, mod
 		if cap.ReadOnly {
 			return decision(Allow, "mode.read_only", "只读模式放行只读工具")
 		}
-		return decision(Deny, "mode.read_only", "只读模式拦下写入: "+tool)
+		return readonlyDeny(tool)
 	case s.matchRules(&s.ProjectRules.Allow, tool, input):
 		return decision(Allow, "rule.project.allow", "项目规则放行: "+tool)
 	}

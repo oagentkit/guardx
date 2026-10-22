@@ -2,6 +2,7 @@ package permgate
 
 import (
 	"context"
+	"sync"
 	"testing"
 )
 
@@ -37,6 +38,9 @@ func TestPriorityChain(t *testing.T) {
 		{"项目 ask", "bash", "git push origin", ModeDefault, Capability{}, Ask, "rule.project.ask"},
 		{"只读模式放行只读", "read", nil, ModeReadOnly, Capability{ReadOnly: true}, Allow, "mode.read_only"},
 		{"只读模式拦写入", "write", map[string]any{"file_path": "a"}, ModeReadOnly, Capability{}, Deny, "mode.read_only"},
+		{"只读模式拒 alwaysAsk 写入", "deploy", nil, ModeReadOnly, Capability{AlwaysAsk: true}, Deny, "mode.read_only"},
+		{"只读模式拒项目 ask 的写入", "bash", "git push origin", ModeReadOnly, Capability{}, Deny, "mode.read_only"},
+		{"只读模式不拦 alwaysAsk 的只读工具", "read", nil, ModeReadOnly, Capability{AlwaysAsk: true, ReadOnly: true}, Ask, "tool.alwaysAsk"},
 		{"项目 allow", "webfetch", map[string]any{"url": "https://docs.example.com/a"}, ModeDefault, Capability{}, Allow, "rule.project.allow"},
 	}
 	for _, tc := range cases {
@@ -172,4 +176,62 @@ func TestWildcardPathTraversalDenied(t *testing.T) {
 	if d2.Behavior != Allow {
 		t.Fatalf("正常子路径应放行: %+v", d2)
 	}
+}
+
+// TestReadOnlyModeDeniesInsteadOfAsk 回归（issue #24）：只读档对写入类工具是
+// 「禁」不是「问」——alwaysAsk 与 project ask 两处「问」都不得把它短路成 Ask
+// （否则只读退化成「换个姿势问」）。
+func TestReadOnlyModeDeniesInsteadOfAsk(t *testing.T) {
+	s := &Service{
+		ProjectRules: Ruleset{
+			Ask: []Rule{{ToolName: "bash", Content: "git push:*"}},
+		},
+	}
+	// alwaysAsk 段：只读档直接拒
+	if d := s.Check(ctx, "deploy", nil, ModeReadOnly, Capability{AlwaysAsk: true}); d.Behavior != Deny || d.RuleID != "mode.read_only" {
+		t.Fatalf("只读+alwaysAsk 应直接拒: %+v", d)
+	}
+	// project ask 段：同一条规则在只读档是「禁」
+	if d := s.Check(ctx, "bash", "git push origin", ModeReadOnly, Capability{}); d.Behavior != Deny || d.RuleID != "mode.read_only" {
+		t.Fatalf("只读+项目ask 应直接拒: %+v", d)
+	}
+	// 默认档不变：仍是「问」
+	if d := s.Check(ctx, "deploy", nil, ModeDefault, Capability{AlwaysAsk: true}); d.Behavior != Ask || d.RuleID != "tool.alwaysAsk" {
+		t.Fatalf("默认档+alwaysAsk 应问: %+v", d)
+	}
+	if d := s.Check(ctx, "bash", "git push origin", ModeDefault, Capability{}); d.Behavior != Ask || d.RuleID != "rule.project.ask" {
+		t.Fatalf("默认档+项目ask 应问: %+v", d)
+	}
+	// 只读工具在只读档照常放行
+	if d := s.Check(ctx, "read", nil, ModeReadOnly, Capability{ReadOnly: true}); d.Behavior != Allow || d.RuleID != "mode.read_only" {
+		t.Fatalf("只读+只读工具应放行: %+v", d)
+	}
+	// 会话授权是用户已经给出的决定（放行），不是一次「问」——保持不看模式
+	s.AllowForSession("deploy", "")
+	if d := s.Check(ctx, "deploy", nil, ModeReadOnly, Capability{AlwaysAsk: true}); d.Behavior != Allow || d.RuleID != "rule.session.allow" {
+		t.Fatalf("只读+会话授权应放行: %+v", d)
+	}
+	// 交互型工具不在拦截范围内：它不产生副作用（plan 档要靠它提问）
+	if d := s.Check(ctx, "ask_user", nil, ModeReadOnly, Capability{RequiresUserInteraction: true}); d.Behavior != Ask {
+		t.Fatalf("只读+交互型应问: %+v", d)
+	}
+}
+
+// TestConcurrentCheckAndSessionGrant -race 回归（AGENTS.md：许可判定链持有状态，
+// 必须有 -race 回归测试兜底）：判定与会话授权并发发生。
+func TestConcurrentCheckAndSessionGrant(t *testing.T) {
+	s := &Service{}
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if i%2 == 0 {
+				s.AllowForSession("deploy", "")
+			} else {
+				_ = s.Check(ctx, "deploy", nil, ModeReadOnly, Capability{AlwaysAsk: true})
+			}
+		}(i)
+	}
+	wg.Wait()
 }
