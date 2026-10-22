@@ -2,6 +2,51 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.14.0] — 2026-10-22
+
+### 修复(permgate)：只读档对写入类工具是「禁」不是「问」
+
+issue #24：只读模式 + 危险工具拿到的是 Ask（＝问一句），与「拒」语义相反——
+只读档的意义正是「不给问的机会」，否则只读退化成「换个姿势问」。
+根因不是「表达不了」，是**实现与本仓自己的分段文档相矛盾**：
+包注释第 13 行写的就是「只读模式 → 只读工具放行、其余拦下」，只读段
+（permgate.go:175-179）本身返回的也已经是 Deny——只是两处更早的「问」
+把它短路成了 Ask：
+  - checkAlwaysAsk（:138）全程不看 mode，alwaysAsk 工具在只读档落 Ask；
+  - checkStandard（:165）里 project ask（:173）排在只读段（:175）之前。
+改法：新增只读拦截段（readonlyWrite / readonlyDeny，单源），插在
+  - checkStandard：project ask 之前；
+  - checkAlwaysAsk：会话授权之后、ask 之前。
+既有分段的相对顺序未变（插入而非调换）；RuleID / Reason 与原只读段逐字
+相同（mode.read_only / 只读模式拦下写入: X）⇒ 审计口径不变，按 RuleID
+聚合的既有消费方不受影响。
+公共 API 零变更：不新增导出符号，不改 Capability / Mode / Ruleset /
+Service 形态 ⇒ 门面 agentkit/permgate/alias.go 无需跟进。
+有意不改的边界（详见 issue #24 评论）：
+  - 会话授权在只读档仍放行（是用户已经给出的决定，不是「问」；本仓既有
+    语义「会话授权段 → 命中即放行，不看模式」）；
+  - 交互型工具在只读档仍 Ask（不产生副作用，plan 档要靠它向用户提问）；
+  - 默认档不变（危险工具在 default 档仍是 Ask）。
+门禁自检：go build ✅ / go vet ✅ / go test -race ✅ 9 包全绿 / gofmt ✅ /
+go mod tidy ✅。反证样本——回退实现后新测试红在断言上（3 处），非编译层。
+
+- 杂务(deps)：oekit/pkg 依赖地板抬到 v0.22.0
+
+矩阵的发版时刻地板门禁（verify_tag_floor）要求：打 tag 那一刻的依赖地板
+必须是当时的最新——guardx 钉在 v0.20.0，而远端最新已是 v0.22.0。
+不先抬地板就打 tag，产出的就是「出生即落后」的 tag（tag 受 protect-tags
+保护，不可重打）。
+本仓只用 oekit/pkg/errors 的 4 个函数（New / As / Is / Wrap），实测
+v0.20.0 → v0.22.0 之间该包**逐字未改**（git diff --stat v0.20.0 v0.22.0
+-- errors/ 输出为空）；两版的新增全在别处：
+  - v0.21.0：pathx.SanitizeFileName
+  - v0.22.0：pathx.MatchGlob、pathx.IsSafeFileName、stringx.SplitCSVNonEmpty
+故这是纯地板追平，零行为差异。
+改动面：go.mod 1 行版本号 + go.sum 2 增 2 删。
+门禁自检：go build ✅ / go vet ✅ / go test -race ✅ 9 包全绿 / gofmt ✅ /
+go mod tidy ✅
+
+
 ## [v0.13.1] — 2026-10-21
 
 - 杂务(deps)：oekit/pkg 依赖地板抬到 v0.20.0
