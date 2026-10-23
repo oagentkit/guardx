@@ -10,9 +10,9 @@
 fence/  injectband/  logredact/  egress/  permgate/  invoke/  toolfail/  sandbox/  wire/
 ```
 
-**本仓是 1 个 Go module、1 条版本线、零外部依赖。**
+**本仓是 1 个 Go module、1 条版本线、零第三方依赖。**
 
-### 依赖地板：为什么主模块必须零外部依赖
+### 依赖地板：为什么主模块必须零第三方依赖
 
 `import "github.com/oagentkit/guardx/logredact"` 会把**整个模块的 require 拉进消费方的
 模块图**（Go 按 module 结算依赖面，不按 package）。实测：拆分前只 import logredact 的
@@ -25,7 +25,14 @@ fence/  injectband/  logredact/  egress/  permgate/  invoke/  toolfail/  sandbox
 | `guardx/audit` | [`github.com/oagentkit/obs/audit`](https://github.com/oagentkit/obs) | 依赖 `oekit/logx`（审计日志门面）；obs 本就带 logx |
 | `guardx/bashguard` | [`github.com/oagentkit/tools/bashguard`](https://github.com/oagentkit/tools) | 依赖 `mvdan.cc/sh/v3`（真 shell AST 解析）；tools 是重仓 |
 
-迁出后主模块 `go list -m all` 只有自己一行 —— **这条就是门禁要守的东西**。
+迁出后主模块的 `go list -m all` **只剩两行** —— 自己 + 第一方基座 `github.com/oekit/pkg`：
+
+```
+github.com/oagentkit/guardx
+github.com/oekit/pkg v0.22.1
+```
+
+**这条就是门禁要守的东西**：第三方依赖**一条都不许有**。
 
 > ⚠️ `github.com/oagentkit/guardx/audit` 与 `.../guardx/bashguard` 这两条 import 路径
 > 已**退役**（它们曾短暂以嵌套 module 形式存在，tag `audit/v0.1.0` / `bashguard/v0.1.0`
@@ -39,9 +46,13 @@ fence/  injectband/  logredact/  egress/  permgate/  invoke/  toolfail/  sandbox
 ### 分层与依赖
 
 - 依赖严格自底向上，**禁止反向依赖**。本仓是 tier 0，任何矩阵内模块都不得被本仓依赖。
-- **本仓不得有外部依赖**（`require` 段必须为空）。需要第三方库 → 另起仓，不要在本仓开嵌套子模块
+- **本仓不得有第三方依赖**（`require` 段只允许第一方基座 `github.com/oekit/*`）。需要第三方库 → 另起仓，不要在本仓开嵌套子模块
   （嵌套子模块会让「一仓一 module」的矩阵模型破掉：版本线分裂、矩阵与门禁都得加特例）。
-- **新增外部依赖前先确认 `oekit/pkg` 里没有。**
+- **新增第三方依赖前先确认 `oekit/pkg` 里没有。**
+- ⚠️ 主模块**确实有**一条 `require`：`github.com/oekit/pkg`（第一方基座，用于 `errors` 哨兵与错误包裹，全家族一致）。
+  它**不是**第三方依赖 —— 本仓守的是「**零第三方依赖**」，不是「一条 `require` 都没有」。
+  矩阵的 tier 0 定义（`modules.json`：「零重量级第三方地板（纯 stdlib / 第一方基座）」）
+  与 `verify_dep_floor.py` 的基座白名单都把第一方基座算作**允许**的依赖。
 - 本仓是 tier 0 **基础层**：地板被所有下游继承，任何一条第三方依赖都会顺着
   依赖树扩散到矩阵每一层。带重依赖的能力属于重仓（obs / tools / llm …）。
 

@@ -3,23 +3,27 @@
 > 一句话：**给 Agent 运行时用的安全原语**——凭据脱敏、出站管控、权限判定、
 > 提示注入卫生。每包一个机制面，零编排语义，可单独取用。
 > （Shell 裁决已迁至 `github.com/oagentkit/tools/bashguard`，审计留痕已迁至
-> `github.com/oagentkit/obs/audit` —— 两者带第三方依赖，不属于零依赖底座。）
+> `github.com/oagentkit/obs/audit` —— 两者带第三方依赖，不属于零第三方依赖底座。）
 
 oagentkit 模块矩阵的 **tier 0 安全层**。与矩阵其余仓的关系：
-`textx`/`runtime` 是零依赖底座，`guardx` 与它们同级；`agent`/`toolgate` 等编排层
+`textx`/`runtime` 是零第三方依赖底座，`guardx` 与它们同级；`agent`/`toolgate` 等编排层
 在它们之上消费本仓原语。
 
-## 一个 module，零外部依赖
+## 一个 module，零第三方依赖
 
-本仓是 **1 个 Go module、1 条版本线、零外部依赖**：
+本仓是 **1 个 Go module、1 条版本线、零第三方依赖**：
 
 ```
 github.com/oagentkit/guardx → fence injectband logredact egress permgate invoke toolfail sandbox wire
 ```
 
-主模块**零外部依赖**：只想脱敏的下游 `import "github.com/oagentkit/guardx/logredact"`
+主模块**零第三方依赖**：只想脱敏的下游 `import "github.com/oagentkit/guardx/logredact"`
 不会把日志库和 shell 解析器拖进自己的模块图（Go 的模块图会把被依赖模块的
 `require` 一并拉进来 —— 依赖面按 **module** 结算，不按 package）。
+
+> 唯一一条 `require` 是第一方基座 `github.com/oekit/pkg`（错误哨兵用，见
+> [`AGENTS.md`](./AGENTS.md)）—— 它**不是**第三方依赖。本仓守的是「零第三方依赖」，
+> 不是「一条 `require` 都没有」。
 
 ### 两个带重依赖的包已迁出（v0.7.0）
 
@@ -115,6 +119,6 @@ gofmt -l . && go vet ./...
   把「哪些命令危险」写成代码里的常量，就是把调用方的资产焊进原语仓。
 - **不得引入领域词。** 本仓是 tier 0，地板被所有下游继承——任何一层业务味
   都会顺着依赖树扩散到矩阵每一层。
-- **不得引入外部依赖。** 依赖面按 module 结算：一条第三方依赖会顺着依赖树
+- **不得引入第三方依赖。** 依赖面按 module 结算：一条第三方依赖会顺着依赖树
   扩散到矩阵每一层（哪怕只有一个包用它）。带重依赖的能力属于重仓。
 - **新增包必须带测试**，且覆盖率不靠删用例达标。
