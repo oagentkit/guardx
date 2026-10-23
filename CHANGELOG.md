@@ -2,6 +2,59 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.15.0] — 2026-10-24
+
+### 新增(egress)：具名放行面 Policy + 拨号层胶水 NewClient/MustClient
+
+issue #28：egress 只导出 Options 的两个 bool 位，调用方要现场拼放行面，
+下游各自手搓拨号层胶水——同一份「私网放行 + 回环拒」的语义在多个仓里各写一遍，
+值传岔就出两种故障：校验层放行私网、拨号层按缺省拒（假红）；校验层拒、拨号层放行
+（安全问题）。
+改动：
+- 新增 Policy（放行面本体，带 Check / CheckHost 方法）；
+- Options 收敛为兼容别名（type Options = Policy）——既有调用点逐字编译通过，
+  同一个类型而不是两套并行表示；
+- 新增具名放行面 PublicOnly（= 零值，与 Check/CheckHost 的缺省口径一致）/
+  PrivateNoLoopback / SelfService；
+- 新增 Policy.NewClient / Policy.MustClient：把同一份放行面落到
+  http.Transport 的拨号层，判定与写面共用同一个字面量判定函数，
+  且发生在拨号之前（被拒的地址不会被连上）。
+取舍：拨号层刻意不做「连上之后核对实际对端地址」——那会让拨号层比写面更严
+（写面放行域名、拨号层拒它的解析结果），两层口径就不一致了，正是本改动要
+消灭的形态。解析层防护仍由消费方按需叠加（与包既有口径一致）。
+拨号层多出来的价值：重定向（http.Client 默认跟随重定向，写面只校验了最初
+那个 URL，真正被拨号的是重定向目标）与漏调写面校验的调用方。
+兼容性：公共 API 只增不改（Options 仍是导出 type，只是变成别名）；
+不新增任何依赖（本仓 tier 0，require 段不变）；
+门面 agentkit/egress/alias.go 需补 4 个转发，随门面发版一起做。
+门禁自检：go build ✅ / go vet ✅ / go test -race ✅ 9 包全绿 /
+go mod tidy -diff ✅ / gofmt ✅ / golangci-lint 0 issues ✅ /
+覆盖率 egress 92.1%、全模块 95.3%（阈值 30%）。
+反证样本——回退「不挂拨号守卫」3 条测试红；回退「先连后判」1 条测试红
+（dialed=[127.0.0.1:62576]），非编译层。
+
+- 杂务(deps)：oekit/pkg 依赖地板抬到 v0.22.1
+
+矩阵的**发版时刻地板门禁**（`verify_tag_floor`）要求：打 tag 那一刻的依赖地板
+必须是当时的最新。guardx 钉在 `oekit/pkg v0.22.0`，而基座已于 2026-10-24T02:17
+发布 `v0.22.1` ⇒ 本仓 HEAD（2026-10-22T17:46）之后一旦有新的 push，
+地板就会变成「出生即落后」——tag 受 `protect-tags` 保护**不可重打**，
+只能记进 `tag_floor_debt.json` 欠账基线。
+## 零行为差异的实证
+本仓只用 `oekit/pkg/errors` 的 4 个函数（New / As / Is / Wrap）。实测两版之间
+该包**逐字未改**：
+```
+$ git diff --stat v0.22.0 v0.22.1 -- errors/
+（空输出）
+```
+v0.22.1 的新增全在别处（`urlguard` 的 CIDR / 域名放宽位与配套测试，
+外加文档），本仓一行都不 import ⇒ 纯地板追平，**零行为差异**。
+## 改动面
+`go.mod` 1 行版本号 + `go.sum` 2 增 2 删。
+门禁自检：go build ✅ / go vet ✅ / go test -race ✅ 9 包全绿 /
+go mod tidy -diff ✅ / gofmt ✅。
+
+
 ## [v0.14.0] — 2026-10-22
 
 ### 修复(permgate)：只读档对写入类工具是「禁」不是「问」
