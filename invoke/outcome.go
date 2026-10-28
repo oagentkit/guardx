@@ -14,10 +14,13 @@ package invoke
 // 或做了一次演练（什么都没跑，但这是调用方要的），两者都以**一次成功返回**结束
 // ⇒ 门禁层长成 Allowed=true, Err=nil，而 Allowed 读起来是「执行了」。
 //
-// # 两个字段必须独立
+// # 各字段必须独立
 //
 // 「拒绝」与「演练」不可合成一个 bool：合成之后下游一定会把演练记成拒绝——
 // 那是在审计唯一要回答的那个问题上造假警报。演练不是拒绝，是调用方要的行为。
+//
+// 「这次演练若真跑会不会跑」（WouldExecute）是第三个**独立**事实：它与
+// 「拒绝/演练」都不正交（演练里两种都有），所以同样不能合成进同一个 bool。
 type Outcome struct {
 	// Refused 非空 ⇒ 执行体拒绝执行本次动作；值是拒绝原因。
 	//
@@ -26,6 +29,16 @@ type Outcome struct {
 	Refused string
 	// DryRun 为真 ⇒ 本次是演练：什么都没跑，但这是调用方要的（不是拒绝）。
 	DryRun bool
+	// WouldExecute 为真 ⇒ 这次演练**若真跑，会执行**；为假 ⇒ 不会
+	// （它被风险分类挡住了，差一次确认）。
+	//
+	// 它把「演练」分成两种：这条命令本来就能跑（只读 / 普通写，或确认本来就
+	// 带着），与它差一次确认才会动真格。只记 DryRun 的话，审计答不出
+	// 「这次差一步就动真格吗」——那是两个完全不同的结论。
+	//
+	// 语义边界：**只在 DryRun 为真时有意义**；不是演练时恒为 false。
+	// （演练什么都没跑，这一条不因 WouldExecute 而变——见 Acted。）
+	WouldExecute bool
 }
 
 // Acted 报告「事情做没做」。
@@ -39,6 +52,10 @@ type Outcome struct {
 //
 // nil 安全：调用方拿到 *Outcome 之后不必先判空——未声明与「声明了但做了」
 // 在这里都是 true，判空只会在下游写出一份漏判的分支。
+//
+// ⚠️ WouldExecute **不参与**这个判定：它是「若真跑会怎样」的预判，不是
+// 「这次做了什么」的结论。演练（DryRun=true）即便 WouldExecute=true，
+// 这次也什么都没做 ⇒ Acted() 仍为 false。
 func (o *Outcome) Acted() bool {
 	if o == nil {
 		return true
