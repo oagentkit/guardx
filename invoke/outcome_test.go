@@ -242,3 +242,87 @@ func TestRecordOutcomeSurvivesConcurrentCalls(t *testing.T) {
 		}
 	}
 }
+
+// ── 第三格：演练若真跑会不会跑 ──
+
+// TestOutcomeWouldExecuteReachesRecord 钉住第三格进得了留痕通路。
+//
+// 这一格在下游不是冗余：演练的答复里同时带着「被风险分类挡住了」的提示，
+// 而留痕**故意不把演练记成拒绝**（那是假警报）⇒ 「这次演练差一次确认」
+// 这件事，在留痕里只剩这一格能说。留痕通路带不到它，下游就只能在链外
+// 另开一条（一份数据两处存放）。
+func TestOutcomeWouldExecuteReachesRecord(t *testing.T) {
+	_, rec := recordOf(t, func(context.Context, Call) (Result, error) {
+		return Result{
+			Text:    "演练：未真正执行",
+			Outcome: &Outcome{DryRun: true, WouldExecute: true},
+		}, nil
+	})
+
+	if rec.Outcome == nil {
+		t.Fatal("动作层结论必须抄进留痕")
+	}
+	if !rec.Outcome.WouldExecute {
+		t.Fatal("第三格必须原样进留痕")
+	}
+	if !rec.DryRun() {
+		t.Fatal("演练标记必须同时在位")
+	}
+}
+
+// TestOutcomeWouldExecuteDistinguishesDryRuns 钉住「两种演练」分得开。
+//
+// 只记 DryRun 的话，审计答不出「这次差一步就动真格吗」——而这两个演练
+// 的处置完全不同：一个是预演，一个是被挡在门外。
+func TestOutcomeWouldExecuteDistinguishesDryRuns(t *testing.T) {
+	_, wouldRun := recordOf(t, func(context.Context, Call) (Result, error) {
+		return Result{Outcome: &Outcome{DryRun: true, WouldExecute: true}}, nil
+	})
+	_, blocked := recordOf(t, func(context.Context, Call) (Result, error) {
+		return Result{Outcome: &Outcome{DryRun: true, WouldExecute: false}}, nil
+	})
+
+	if wouldRun.Outcome == nil || blocked.Outcome == nil {
+		t.Fatal("两次调用都必须有结论")
+	}
+	if !wouldRun.Outcome.WouldExecute {
+		t.Fatal("「本来就能跑」的演练必须带 WouldExecute=true")
+	}
+	if blocked.Outcome.WouldExecute {
+		t.Fatal("「差一次确认」的演练必须带 WouldExecute=false")
+	}
+	// 两者都是演练 ⇒ 都不是拒绝（假警报要防住）
+	if wouldRun.Refused() || blocked.Refused() {
+		t.Fatal("演练不得被记成拒绝")
+	}
+}
+
+// TestOutcomeWouldExecuteDoesNotChangeActed 钉住判定表不受第三格影响。
+//
+// WouldExecute 是「若真跑会怎样」的**预判**，不是「这次做了什么」的结论。
+// 演练即便 WouldExecute=true，这次也什么都没做 ⇒ Acted() 仍为 false。
+//
+// 反证样本：把 Acted() 改成「WouldExecute 为真就当做了」⇒ 本用例立刻红。
+func TestOutcomeWouldExecuteDoesNotChangeActed(t *testing.T) {
+	o := &Outcome{DryRun: true, WouldExecute: true}
+	if o.Acted() {
+		t.Fatal("演练什么都没做，Acted 必须为 false（与 WouldExecute 无关）")
+	}
+	rec := Record{Outcome: o}
+	if rec.Acted() {
+		t.Fatal("留痕侧同理：演练没动手")
+	}
+}
+
+// TestOutcomeWouldExecuteDefaultsFalseWhenNotDryRun 钉住零值语义。
+//
+// 不是演练时恒为 false（语义边界）⇒ 零值即可，不额外约束执行体。
+func TestOutcomeWouldExecuteDefaultsFalseWhenNotDryRun(t *testing.T) {
+	o := &Outcome{}
+	if o.WouldExecute {
+		t.Fatal("不是演练时 WouldExecute 必须为 false")
+	}
+	if !o.Acted() {
+		t.Fatal("未声明拒绝也未演练 ⇒ Acted 为 true")
+	}
+}
