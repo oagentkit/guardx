@@ -44,7 +44,7 @@ func TestRedactPayloadsRecordsOriginalLength(t *testing.T) {
 func TestRedactPayloadsExample(t *testing.T) {
 	in := `{"content_base64": "` + strings.Repeat("QUJD", 34) + `", "note": "keep me"}`
 	got := RedactPayloads(in, "content_base64")
-	want := fmt.Sprintf(`{"content_base64": "<136 bytes scrubbed>", "note": "keep me"}`)
+	want := `{"content_base64": "<136 bytes scrubbed>", "note": "keep me"}`
 	if got != want {
 		t.Fatalf("实得 %s", got)
 	}
