@@ -23,12 +23,24 @@ type Call struct {
 type Result struct {
 	Text       string
 	Structured json.RawMessage
+	// Outcome 执行体自己的动作层结论（可选）：「事情做没做」。
+	//
+	// nil ⇒ 未声明 ⇒ 按「执行了」处理，保持既有调用方行为不变。
+	// 声明了就由链原样抄进 Record（见 Record.Outcome），让留痕能回答
+	// 「这次到底动了没有」——那是门禁层回答不了的问题（门禁只知道 capability
+	// 与 confirm 标志，命令是什么只有工具知道）。
+	Outcome *Outcome
 }
 
 // Handler 真正的执行体——链的终点，也是链唯一持有的执行入口。
 //
 // 契约：Handler 不得把 ctx 之外的可变状态当成请求无关的；跨调用共享状态由调用方
 // 自己负责同步。本包不替 Handler 加锁（那是执行体的事，不是链的事）。
+//
+// 执行体若在内部拒绝了这次动作、或做了一次演练（两者都以**成功返回**结束），
+// 必须由它自己在 Result.Outcome 里声明：门禁能看见的只有 capability 与 confirm
+// 标志，命令是什么只有执行体知道。门禁替它猜是不行的——猜错的方向恰恰是
+// 审计唯一要回答的那个问题。
 type Handler func(ctx context.Context, c Call) (Result, error)
 
 // Verdict 一环的判定结论。
@@ -157,13 +169,52 @@ type StageResult struct {
 // 不变式：**任何结局都恰好一条**——放行、拒绝、阶段报错、执行体报错、panic。
 // 「有一条」和「只有一条」同样重要：多一条会让审计把同一次调用算成两次，
 // 少一条则等于这次调用没发生过。
+//
+// 一条留痕里有**两层结论**（门禁层 / 动作层），缺一层审计就答不全问题：
+// Allowed / Err 是门禁判了什么，Outcome 是事情做没做。见 Outcome 的说明。
 type Record struct {
-	Call     Call
-	Stages   []StageResult
-	Allowed  bool          // 是否真的到达了执行体
+	Call    Call
+	Stages  []StageResult
+	Allowed bool // 是否真的到达了执行体
+	// Outcome 动作层结论：执行体自己声明的「事情做没做」，原样抄自 Result.Outcome。
+	//
+	// nil ⇒ 执行体未声明 ⇒ 按「执行了」处理。
+	// 它与 Allowed 分属两层事实：Allowed 说的是门禁判了什么，Outcome 说的是
+	// 事情做没做——执行体确实被到达了、门禁也确实放行了，但它可能自己拒了或只是演练。
+	Outcome  *Outcome
 	Err      error         // 收口原因，nil 即放行成功
 	Duration time.Duration // 整链耗时
 	OutBytes int           // 出参字节数（Text + Structured），留痕用
+}
+
+// Refused 报告执行体是否拒绝了本次动作（nil 安全）。
+//
+// 与 DryRun 必须分开读：把演练记成拒绝，是在审计唯一要回答的问题上造假警报。
+func (r Record) Refused() bool {
+	return r.Outcome != nil && r.Outcome.Refused != ""
+}
+
+// DryRun 报告本次是否为演练（nil 安全）。演练不是拒绝，是调用方要的行为。
+func (r Record) DryRun() bool {
+	return r.Outcome != nil && r.Outcome.DryRun
+}
+
+// Acted 报告这次调用在动作层上是否真的动了手。
+//
+// 判定表：
+//
+//   - Outcome != nil ⇒ 按执行体的声明判（声明优先）：拒绝 ⇒ false，演练 ⇒ false。
+//   - Outcome == nil ⇒ 未声明：调用成功收口（Err == nil）按「执行了」处理，
+//     失败收口按「没动」处理。
+//
+// 「声明优先」是关键：执行体说自己做了什么，就以它为准——只有它没说时，
+// 才由链按收口结果兜底。否则「执行体动了手但回包失败」这类结局会被链
+// 改写成「没动」，把执行体的事实覆盖成链的猜测。
+func (r Record) Acted() bool {
+	if r.Outcome != nil {
+		return r.Outcome.Acted()
+	}
+	return r.Err == nil
 }
 
 // ChainOption 链构造选项。
@@ -321,6 +372,10 @@ func (c *Chain) Do(ctx context.Context, call Call) (res Result, err error) {
 	}
 
 	res, err = runHandler(ctx, c.handler, call)
+	// 动作层结论先抄进留痕，再看错误：即使下面要丢弃 Result（错误路径返回零值），
+	// 留痕里也必须留着「执行体说了什么」——否则「工具自己拒了、但它用的是 error
+	// 返回」这一类结局在审计面仍退化成「执行了」。
+	rec.Outcome = res.Outcome
 	if err != nil {
 		return Result{}, err
 	}
