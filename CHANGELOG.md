@@ -2,6 +2,61 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.16.0] — 2026-10-28
+
+### 新增(invoke)：给动作层结论一个位置——执行体自拒/演练不再被记成「执行了」
+
+issue #33：invoke.Record 只有「准入层」结论（Allowed / Err），缺「动作层」结论。
+工具在执行体内部自己拒绝这次动作（缺 confirm）、或做了一次演练，两者都以
+一次成功返回结束 ⇒ Record 长成 Allowed=true, Err=nil，读起来是「执行了」。
+门禁能看见的只有 capability 与 confirm 标志，命令是什么只有工具知道 ⇒
+这个结论只能由执行体给出，而 Record 里此前没有它的位置。
+改动：
+- 新增 invoke.Outcome{Refused string; DryRun bool}：动作层结论，两个字段独立
+  （合成一个 bool 之后下游一定会把演练记成拒绝——那是审计唯一要回答的问题上的
+  假警报）；
+- Result.Outcome *Outcome：执行体显式给出；nil ⇒ 未声明 ⇒ 按「执行了」处理，
+  既有调用方行为不变；
+- Record.Outcome *Outcome：链原样抄进留痕，recorder 回调因此拿得到动作层结论
+  （只落在 Result 上的话，留痕通路仍不完整，下游还是得在链外另接一条）；
+- Record.Refused() / Record.DryRun() / Record.Acted() 与 Outcome.Acted() /
+  Outcome.RefusalReason()：判定表写进 API，下游不必再自己拼；
+- 错误返回路径同样保留执行体声明的结论（否则「工具自拒但用 error 返回」这一类
+  结局在审计面仍退化成「执行了」）；
+- invoke 包 godoc 补「两层结论：门禁层 / 动作层」一节。
+门禁层与动作层分离：Allowed 保持现语义（是否到达了执行体），不因执行体自拒而
+翻转——执行体确实被到达了，只是它自己决定不动手。
+兼容性：Result / Record 各新增一个字段（无键字面量会编译失败，0.x 阶段 minor
+版允许）；既有调用方一律行为不变（未声明 ⇒ 按「执行了」处理）。
+门面 agentkit/invoke 需补 Outcome 转发，随门面发版一起做。
+门禁自检：go build ✅ / go vet ✅ / go test -race ✅ 9 包全绿 /
+go mod tidy -diff ✅ / gofmt ✅ / golangci-lint 0 issues ✅ /
+覆盖率 95.4%（阈值 30%）。
+反证样本——删除「结论抄进留痕」4 条用例红；把 DryRun 当成「做了」2 条红；
+Outcome.Acted() 恒为 true 4 条红。
+
+- 杂务(deps)：oekit/pkg 依赖地板抬到 v0.29.1
+
+矩阵的**发版时刻地板门禁**（`verify_tag_floor`）要求：打 tag 那一刻的依赖地板
+必须是当时的最新。guardx 钉在 `oekit/pkg v0.22.1`，而基座最新已是 `v0.29.1`
+⇒ 不抬地板就打不出 tag（tag 受 `protect-tags` 保护**不可重打**）。
+## 零行为差异的实证
+本仓只用 `oekit/pkg/errors` 的 5 个函数（New / As / Is / Wrap / Errorf）。
+两版之间该包的**导出 API 逐字一致**（`go doc -all` 对比：只有注释差异，无签名差异）：
+- biz_error.go：新增 typed-nil 接收者保护（Error / Code / Unwrap 不再崩）；
+- format.go、errs.go：注释与防御性拷贝说明；
+- 无导出符号被删或改签名。
+唯一的行为差异在 `Errorf`：**格式化结果为空串且无 %w 时返回 nil**，有 %w 时
+**不返回 nil**（上游修掉了「把失败静默吞成成功」）。本仓唯一的 `Errorf` 调用
+（`egress/client.go:50`）格式串非空、无 %w ⇒ 该路径行为不变。
+## 改动面
+`go.mod` 1 行版本号 + `go.sum` 2 增 2 删。
+门禁自检：go build ✅ / go vet ✅ / go test -race ✅ 9 包全绿 /
+go mod tidy -diff ✅ / gofmt ✅。
+
+
+- 文档(guardx)：刷正依赖红线声明——「零外部依赖 / require 段必须为空」→「零第三方依赖」
+
 ## [v0.15.0] — 2026-10-24
 
 ### 新增(egress)：具名放行面 Policy + 拨号层胶水 NewClient/MustClient
