@@ -2,6 +2,61 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.17.0] — 2026-10-28
+
+### 新增(invoke)：动作层结论补第三格——这次演练若真跑，会不会跑
+
+issue #39：Outcome 只有两格（Refused / DryRun），少一格「这次演练若真跑会不会跑」。
+「演练」只说「什么都没跑」，但它没说这次演练**有没有意义**——有两种完全不同的
+「没跑」：
+- 这条命令本来就能跑（只读 / 普通写，或确认本来就带着）⇒ 若真跑，它会执行；
+- 这条命令被风险分类挡住了，差一次确认 ⇒ 若真跑，它**不会**执行。
+只记 DryRun 的话，审计答不出「这次演练是差一步就能动真格，还是这条命令本来
+就能跑」。
+改动：
+- Outcome 补第三格 `WouldExecute bool`：为真 ⇒ 这次演练若真跑会执行；
+  为假 ⇒ 不会（被风险分类挡住了，差一次确认）。
+- 语义边界：只在 DryRun 为真时有意义；不是演练时恒为 false（零值即可）。
+- Acted() 的判定表**不受影响**：它是「若真跑会怎样」的预判，不是「这次做了什么」
+  的结论——演练即便 WouldExecute=true，这次也什么都没做 ⇒ Acted() 仍为 false。
+留痕侧不用加方法：Record.Outcome 是同一个结构体，rec.Outcome.WouldExecute
+直接可读 —— 这一格必须能进留痕通路（下游的留痕故意不把演练记成拒绝，
+「差一次确认」这件事在留痕里只剩这一格能说；留痕带不到，下游就得在链外
+另开一条通路 = 一份数据两处存放）。
+门禁自检：go build ✅ / go vet ✅ / go test -race ✅ 9 包全绿 /
+go mod tidy -diff ✅ / gofmt ✅。
+反证样本——Acted() 把 WouldExecute=true 当成「做了」1 条红；
+第三格不抄进留痕 2 条红。
+
+### 新增(logredact)：给载荷字段一个「只记长度」的档——顺序由入口内部保证
+
+issue #34：logredact 认的是**形状**（Authorization 头、token 前缀、password 字段、
+PEM 私钥块），但有一类字段不是凭据形状而是**载荷**（content / content_base64 /
+body：一段 base64 私钥、一份文件内容、一个任意 API body）——它们长得就是字母数字，
+形状规则认不出来，一旦写进日志就是**完整**落盘。
+而 `RedactWith` 的顺序是先内建、后扩展（扩展只能追加在内建之后）⇒ 现在的 API
+表达不了「载荷裁剪排在形状规则之前」；没有这个顺序，报出来的长度是**残片**的长度
+（135 字节的私钥先被打码，再量长度就报成 21），那是谎报。
+改动：
+- 新增「载荷只记长度」这一档：匹配字段的**字符串值**换成 "<N bytes scrubbed>"，
+  N = 原值的解码后字节长度；
+- `RedactPayloads(s, fields...)` / `RedactPayloadsWith(s, fields, extra)`：
+  文本入口，三段顺序固定为 **载荷裁剪 → 内建规则 → 扩展规则**；
+- `RedactPayloadValue(v, fields...)`：结构化入口（与 RedactValue 对称）；
+- `NewPayloadRedactor(fields, extra)`：热路径复用（与 NewRedactor 对称）；
+- 幂等：已是标记的值原样保留（否则第二遍会报出 "<21 bytes scrubbed>"——
+  一个凭空捏造的长度，比不幂等更坏）。
+边界（刻意的）：
+- 字段名白名单**没有默认值**——哪些字段算载荷是调用方的口径；
+- 只裁剪**字符串形态**的字段值；对象/数组形态的值原样保留、只递归下探；
+- 文本入口不改写 JSON 结构（只替换值那一段），非 JSON 文本原样返回。
+不做 issue 里的 ②（Rule.Before 排序位）：载荷那一档走独立入口即可、不进规则表，
+排序位是另一件事。
+门禁自检：go build ✅ / go vet ✅ / go test -race ✅ 9 包全绿 /
+go mod tidy -diff ✅ / gofmt ✅ / golangci-lint 0 issues ✅。
+反证样本——把裁剪排到形状规则之后 1 条红；不裁剪载荷 6 条红；破坏幂等 1 条红。
+* fix(logredact): 去掉多余的 fmt.Sprintf（S1039）
+
 ## [v0.16.0] — 2026-10-28
 
 ### 新增(invoke)：给动作层结论一个位置——执行体自拒/演练不再被记成「执行了」
