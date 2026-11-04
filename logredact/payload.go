@@ -53,7 +53,8 @@ func RedactPayloadsWith(s string, fields []string, extra []Rule) string {
 }
 
 // RedactPayloadValue 结构化形态：递归把 fields 指定的字段裁剪成「只记长度」的标记，
-// 其余字符串按 RedactValue 的口径做形状脱敏。
+// 其余字符串按 RedactValue 的口径做形状脱敏（含凭证词键的整值打码——键感知
+// 走 redactWalk 同一份判定）。
 //
 // 与 RedactPayloads 语义一致（同一份判定表），差别只在形态：它吃已解码的值、
 // 吐已解码的值，可用于「按字段名裁剪后再落库」的结构化载荷管道。
@@ -67,7 +68,7 @@ func RedactPayloadValue(v any, fields ...string) any {
 			set[f] = struct{}{}
 		}
 	}
-	return redactValueWith(v, set)
+	return redactWalk(v, set)
 }
 
 // NewPayloadRedactor 返回可复用的「载荷裁剪 + 形状脱敏」函数（字段集与规则表
@@ -153,36 +154,4 @@ func jsonStringLen(lit string) (int, bool) {
 		return len(lit), false
 	}
 	return len(v), payloadMarkerRe.MatchString(v)
-}
-
-// redactValueWith 递归裁剪载荷字段并做形状脱敏。
-func redactValueWith(v any, payload map[string]struct{}) any {
-	switch t := v.(type) {
-	case string:
-		return Redact(t)
-	case map[string]any:
-		out := make(map[string]any, len(t))
-		for k, vv := range t {
-			if _, ok := payload[k]; ok {
-				if s, isStr := vv.(string); isStr {
-					if payloadMarkerRe.MatchString(s) {
-						out[k] = s // 已是标记 ⇒ 原样保留（幂等）
-						continue
-					}
-					out[k] = fmt.Sprintf(payloadMarkerFormat, len(s))
-					continue
-				}
-			}
-			out[k] = redactValueWith(vv, payload)
-		}
-		return out
-	case []any:
-		out := make([]any, len(t))
-		for i, vv := range t {
-			out[i] = redactValueWith(vv, payload)
-		}
-		return out
-	default:
-		return v
-	}
 }

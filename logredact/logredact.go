@@ -60,6 +60,30 @@ type Rule struct {
 //
 // ⚠️ 顺序是语义的一部分：靠前的规则更精确（能定位到凭据体），
 // 靠后的更宽（整段吞掉）。靠后规则看到的是「已被精确处理过」的文本。
+// credentialSuffix 凭证词键的后缀词表（snake/kebab 复合键 + camelCase 拼接
+// 共用）：前缀允许任意字母数字与 [-_] 分隔段，后缀锚定键的末词。
+//
+// 覆盖口径（oagentkit/guardx#45）：pwd/pass 这类**常见缩写**与 token/secret/
+// password/key 的复数形态必须命中——值模式脱敏的承诺是「键表内的键，值必被
+// 打码」，键表覆盖面就是这个承诺的边界，缺一个常见缩写 = 该形态静默泄漏。
+// 已知代价：bypass/surpass 这类以 pass 结尾的普通词会被误伤（over-mask 是
+// 安全方向的错，漏 mask 才是事故）。
+const credentialSuffix = `(?:tokens?|secrets?|pass(?:words?|wds?|es)?|pwds?|passphrases?|api_?keys?|access_?keys?|private[-_]?keys?|secret[-_]?keys?|client[-_]?keys?|auths?|kubeconfig)`
+
+// credentialKeyPart 凭证词键的完整匹配段：复合前缀 + 末词后缀。
+const credentialKeyPart = `([A-Za-z0-9]*(?:[-_][A-Za-z0-9]*)*` + credentialSuffix + `)`
+
+// bareValue 裸值形态：可选的 scheme 前缀（Bearer/Basic + 空白）连同凭据体
+// 一起算作值——bearer 组规则先行打码后留下 `key=Bearer ****`，kv 规则若只吃
+// `Bearer` 一词会留下孤儿掩码段；整体吞掉后输出收敛为单段 `key=****`。
+const bareValue = `((?:(?:Bearer|Basic)\s+)?[^\s&'"]+)`
+
+// kvSeparator 键与值之间的分隔段（含键自身的闭引号）：捕获保留，替换时原样
+// 回填——「"key": "v"」打码后仍是「"key": "****"」，JSON 行的结构不再被
+// 打码动作本身破坏（oagentkit/guardx#44：此前 Repl 把分隔段吞成 `=`，冒号
+// 变等号、引号丢失，日志采集侧的 JSON 解析器整行降级）。
+const kvSeparator = `(["']?\s*[=:]\s*)`
+
 var builtinRules = []Rule{
 	{
 		Name: "url-embedded-credential",
@@ -67,18 +91,68 @@ var builtinRules = []Rule{
 		Repl: "$1://$2:****@",
 	},
 	{
-		// key 单独留紧邻形态（[=:] 后无空白）——"user-keynote" 类散文防误伤
+		// bearer/jwt/vendor 三组锚定**凭据体自身**（Bearer 后的 token 串、eyJ
+		// 三段式、平台特征前缀）——按「精确在前、宽泛在后」的总原则排在键值对
+		// 之前：kv 规则吃掉 `auth=Bearer` 的键值形态后，Bearer/JWT 锚点就没了
+		// （实测回归：auth 入词表后 `auth=Bearer <JWT>` 的 JWT 反而漏网）。
+		Name: "bearer-token",
+		Re:   regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]+`),
+		Repl: "Bearer ****",
+	},
+	{
+		// JWT（三段式， eyJ 头 + 两段 base64url）：出现在日志散文里的裸 JWT。
+		Name: "jwt",
+		Re:   regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`),
+		Repl: "****JWT****",
+	},
+	{
+		// 平台 API token 特征前缀（裸 token 不带 key= 形态出现在散文/URL 路径时的兜底；
+		// 带键形态由后方的键值对规则整值打码，本组先行命中不冲突——kv 规则
+		// 对 `key=****` 的二次替换是幂等的）。
+		Name: "vendor-token-prefix",
+		Re:   regexp.MustCompile(`\b(sk-ant-[A-Za-z0-9_-]{16,}|sk-(?:proj|svcacct|None)-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b`),
+		Repl: "****",
+	},
+	{
+		// key 单独留紧邻形态——"user-keynote" 类散文防误伤（\b 后首字符不是
+		// [=:'] 即不命中）。键值对按**值形态拆三条**（双引号/单引号/裸）：打码
+		// 保留原分隔符与引号形态——JSON 行打码后仍是合法 JSON、YAML 保持
+		// `key: '****'` 原貌；引号形态各自回填还能避免「单引号 kv 内嵌在
+		// JSON 字符串值里」时向外交错注入双引号（oagentkit/guardx#44：此前
+		// Repl 把分隔段吞成 `=`，冒号变等号、引号丢失，采集侧 JSON 解析器
+		// 整行降级）。Repl 按形态硬编码引号是刻意为之——单条正则条件回填
+		// 引号需要 backreference，ReplaceAll 的 $N 语义做不到。
+		Name: "key-value-double-quoted",
+		Re:   regexp.MustCompile(`(?i)\b(key)` + kvSeparator + `("[^"\n]*")`),
+		Repl: `$1$2"****"`,
+	},
+	{
+		Name: "key-value-single-quoted",
+		Re:   regexp.MustCompile(`(?i)\b(key)` + kvSeparator + `('[^'\n]*')`),
+		Repl: `$1$2'****'`,
+	},
+	{
 		Name: "key-value",
-		Re:   regexp.MustCompile(`(?i)\bkey[=:]["']?([^\s&'"]+)`),
-		Repl: "key=****",
+		Re:   regexp.MustCompile(`(?i)\b(key)` + kvSeparator + bareValue),
+		Repl: `$1$2****`,
 	},
 	{
 		// 凭证词键值对（容忍 ": " 空格形态——YAML/缩进 JSON 日志最高频的
 		// `password: xxx` 形态；第九轮审计：password/token 此前漏在紧邻词表，
-		// 冒号后带空格即整体漏网）
+		// 冒号后带空格即整体漏网）。值形态三拆的理由见 key-value 组。
+		Name: "credential-kv-double-quoted",
+		Re:   regexp.MustCompile(`(?i)` + credentialKeyPart + kvSeparator + `("[^"\n]*")`),
+		Repl: `$1$2"****"`,
+	},
+	{
+		Name: "credential-kv-single-quoted",
+		Re:   regexp.MustCompile(`(?i)` + credentialKeyPart + kvSeparator + `('[^'\n]*')`),
+		Repl: `$1$2'****'`,
+	},
+	{
 		Name: "credential-kv",
-		Re:   regexp.MustCompile(`(?i)([A-Za-z0-9]*(?:[-_][A-Za-z0-9]*)*(?:token|secret|password|passwd|passphrase|api_?key|access_?key|private[-_]?key|secret[-_]?key|client[-_]?key|kubeconfig))["']?\s*[=:]\s*(?:"[^"\n&]*"|'[^'\n&]*'|[^\s&'"]+)`),
-		Repl: "$1=****",
+		Re:   regexp.MustCompile(`(?i)` + credentialKeyPart + kvSeparator + bareValue),
+		Repl: `$1$2****`,
 	},
 	{
 		// PEM 私钥整段打码（载荷/日志防泄漏的最后兜底）
@@ -94,29 +168,25 @@ var builtinRules = []Rule{
 		Repl: "----PRIVATE KEY ****（截断）",
 	},
 	{
-		// Authorization 头：值吃到行尾——第九轮审计 C 级修复：\S+ 只吃 scheme
-		// 名（Basic/Bearer），凭据本体残留且后续 Bearer 规则失去锚点兜不住
+		// Authorization 头：引号值两条保形（JSON 行里的 `"authorization": "v"`
+		// 打码后行内其余部分原样保留）；裸值仍吃到行尾——第九轮审计 C 级修复：
+		// \S+ 只吃 scheme 名（Basic/Bearer），凭据本体残留且后续 Bearer 规则
+		// 失去锚点兜不住（Bearer 组现已在键值对之前，锚点保护双保险）。
+		// 裸值吃行尾的代价是散文内嵌形态会把行尾一并吞掉——JSON 键值形态
+		// 已被前两条引号规则截住，不受影响。
+		Name: "authorization-header-double-quoted",
+		Re:   regexp.MustCompile(`(?i)(authorization|www-authenticate)` + kvSeparator + `("[^"\n]*")`),
+		Repl: `$1$2"****"`,
+	},
+	{
+		Name: "authorization-header-single-quoted",
+		Re:   regexp.MustCompile(`(?i)(authorization|www-authenticate)` + kvSeparator + `('[^'\n]*')`),
+		Repl: `$1$2'****'`,
+	},
+	{
 		Name: "authorization-header",
 		Re:   regexp.MustCompile(`(?i)(authorization|www-authenticate)\s*[:=]\s*[^\r\n]*`),
 		Repl: "$1=****",
-	},
-	{
-		Name: "bearer-token",
-		Re:   regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]+`),
-		Repl: "Bearer ****",
-	},
-	{
-		// 平台 API token 特征前缀（裸 token 不带 key= 形态出现在散文/URL 路径时的兜底；
-		// 键值对形态已由上方规则先行打码，本组只负责无键形态）。
-		Name: "vendor-token-prefix",
-		Re:   regexp.MustCompile(`\b(sk-ant-[A-Za-z0-9_-]{16,}|sk-(?:proj|svcacct|None)-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b`),
-		Repl: "****",
-	},
-	{
-		// JWT（三段式， eyJ 头 + 两段 base64url）：出现在日志散文里的裸 JWT。
-		Name: "jwt",
-		Re:   regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`),
-		Repl: "****JWT****",
 	},
 }
 
@@ -226,25 +296,15 @@ func RedactSecrets(s string, secrets ...string) string {
 	return s
 }
 
-// RedactValue 递归脱敏任意 JSON 形态值：map/slice 逐字段下探，字符串过 Redact，其余原样。
-// 事件载荷入库前的统一出口——tool_call 参数与 tool_result 文本常含连接串、webhook key、Bearer 头。
+// RedactValue 递归脱敏任意 JSON 形态值：凭证词键的整值打码（键感知，
+// jsonredact.go），其余 map/slice 逐字段下探，字符串过 Redact，其余原样。
+// 事件载荷入库前的统一出口——tool_call 参数与 tool_result 文本常含连接串、
+// webhook key、Bearer 头。
+//
+// ⚠️ v0.14.0 起键感知（oagentkit/guardx#44 同源缺陷）：此前只有字符串值过
+// 文本规则——而文本规则靠 `password=xxx` 的**键值形态**定位，解码后的值
+// "abc123" 早已失去键上下文 ⇒ `{"password": "abc123"}` 原样透传（泄漏）。
+// 键感知打码补上这层：键名命中凭证词表（jsonCredentialKeyRe）即整值打码。
 func RedactValue(v any) any {
-	switch t := v.(type) {
-	case string:
-		return Redact(t)
-	case map[string]any:
-		out := make(map[string]any, len(t))
-		for k, vv := range t {
-			out[k] = RedactValue(vv)
-		}
-		return out
-	case []any:
-		out := make([]any, len(t))
-		for i, vv := range t {
-			out[i] = RedactValue(vv)
-		}
-		return out
-	default:
-		return v
-	}
+	return redactWalk(v, nil)
 }
