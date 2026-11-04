@@ -37,6 +37,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/oekit/pkg/cache"
 )
 
 // Behavior 判定行为。
@@ -342,16 +344,22 @@ func matchRuleContent(content string, subs []string) bool {
 	return false
 }
 
-var wildcardCache sync.Map // string → *regexp.Regexp
+// wildcardCache `*` 通配匹配正则的编译缓存（键=pattern）。单飞去重：并发首次
+// 命中同一 pattern 时只编译一次，其余请求共享结果。
+//
+// TTL=0 ⇒ 永不过期，且不引入后台清扫 goroutine（与原 sync.Map 无常驻协程一致）。
+var wildcardCache = cache.NewSingleFlightCache(cache.NewLocalCache[regexp.Regexp](cache.LocalConfig[regexp.Regexp]{
+	NullTTL: -1, // 编译失败走 err 分支本就不写 null marker；显式禁用空值缓存，杜绝「查不到」被误当缓存事实
+}))
 
 // wildcardMatch `*` 通配匹配（* 跨任意字符；其余字面）。
 func wildcardMatch(pattern, s string) bool {
-	reAny, ok := wildcardCache.Load(pattern)
-	re, _ := reAny.(*regexp.Regexp)
-	if !ok || re == nil {
-		quoted := regexp.QuoteMeta(pattern)
-		re = regexp.MustCompile("^" + strings.ReplaceAll(quoted, `\*`, ".*") + "$")
-		wildcardCache.Store(pattern, re)
+	re, err := wildcardCache.GetOrLoadWithSource(context.Background(), pattern, func(_ context.Context, p string) (*regexp.Regexp, error) {
+		quoted := regexp.QuoteMeta(p)
+		return regexp.Compile("^" + strings.ReplaceAll(quoted, `\*`, ".*") + "$")
+	})
+	if err != nil || re == nil {
+		return false
 	}
 	return re.MatchString(s)
 }
