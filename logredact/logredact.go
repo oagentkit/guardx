@@ -60,18 +60,32 @@ type Rule struct {
 //
 // ⚠️ 顺序是语义的一部分：靠前的规则更精确（能定位到凭据体），
 // 靠后的更宽（整段吞掉）。靠后规则看到的是「已被精确处理过」的文本。
-// credentialSuffix 凭证词键的后缀词表（snake/kebab 复合键 + camelCase 拼接
-// 共用）：前缀允许任意字母数字与 [-_] 分隔段，后缀锚定键的末词。
+// credentialSuffixGeneral 凭证词键的后缀词表（snake/kebab 复合键 + camelCase
+// 拼接共用）：前缀允许任意字母数字与 [-_] 分隔段，后缀锚定键的末词。
+// token 单独拆出（credentialKeyToken，见其注释）。
 //
-// 覆盖口径（oagentkit/guardx#45）：pwd/pass 这类**常见缩写**与 token/secret/
+// 覆盖口径（oagentkit/guardx#45）：pwd/pass 这类**常见缩写**与 secret/
 // password/key 的复数形态必须命中——值模式脱敏的承诺是「键表内的键，值必被
 // 打码」，键表覆盖面就是这个承诺的边界，缺一个常见缩写 = 该形态静默泄漏。
 // 已知代价：bypass/surpass 这类以 pass 结尾的普通词会被误伤（over-mask 是
 // 安全方向的错，漏 mask 才是事故）。
-const credentialSuffix = `(?:tokens?|secrets?|pass(?:words?|wds?|es)?|pwds?|passphrases?|api_?keys?|access_?keys?|private[-_]?keys?|secret[-_]?keys?|client[-_]?keys?|auths?|kubeconfig)`
+const credentialSuffixGeneral = `(?:secrets?|pass(?:words?|wds?|es)?|pwds?|passphrases?|api_?keys?|access_?keys?|private[-_]?keys?|secret[-_]?keys?|client[-_]?keys?|auths?|kubeconfig)`
 
-// credentialKeyPart 凭证词键的完整匹配段：复合前缀 + 末词后缀。
-const credentialKeyPart = `([A-Za-z0-9]*(?:[-_][A-Za-z0-9]*)*` + credentialSuffix + `)`
+// credTokenPrefix 凭证语义的 token 复合前缀段（v0.18.1 收窄，oagentkit/guardx#52）：
+// 复数 tokens 只在「凭证前缀段 + tokens」时命中。
+//
+// 为什么收窄：旧词表的 tokens? 后缀把 LLM usage 计量字段（prompt_tokens /
+// completion_tokens / total_tokens / cached_tokens / reasoning_tokens——结构化
+// 日志里的高频合法键）整值打码，事件载荷里用量被毁 = 计价/评测/配额读到掩码
+// （数据损坏方向的静默错，比漏打更坏）。计量字段恒为**复数**且前缀无凭证语义
+// ⇒ 复数收窄、单数保持全量命中（*_token 单数形态几乎都是凭证，裸 token 亦然）。
+// 裸复数 tokens（整键就是 "tokens"）保持命中：token 池/令牌数组是合理凭证形态。
+const credTokenPrefix = `(?:access|refresh|auth|api|session|bearer|id|client|device|reset|invite|registration|verification|github|oauth|bot|service|user|app|personal|install|identity|login|sign(?:in|out|up)?|one[_-]?time|activation|confirm|magic|share|webhook|callback|license|csrf|xsrf|secret|admin|sudo|temp)`
+
+// credentialKeyPart 凭证词键的完整匹配段（kv 规则共用，单捕获组 = 键名）：
+// 非 token 词走「复合前缀 + 末词后缀」，token 按 credTokenPrefix 注释的
+// 收窄口径单列一支。
+const credentialKeyPart = `((?:[A-Za-z0-9]*(?:[-_][A-Za-z0-9]*)*` + credentialSuffixGeneral + `)|(?:[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*[-_])?` + credTokenPrefix + `[_-]?tokens|[A-Za-z0-9]*(?:[-_][A-Za-z0-9]*)*token)`
 
 // bareValue 裸值形态：可选的 scheme 前缀（Bearer/Basic + 空白）连同凭据体
 // 一起算作值——bearer 组规则先行打码后留下 `key=Bearer ****`，kv 规则若只吃
@@ -123,13 +137,37 @@ var builtinRules = []Rule{
 		// 整行降级）。Repl 按形态硬编码引号是刻意为之——单条正则条件回填
 		// 引号需要 backreference，ReplaceAll 的 $N 语义做不到。
 		Name: "key-value-double-quoted",
-		Re:   regexp.MustCompile(`(?i)\b(key)` + kvSeparator + `("[^"\n]*")`),
+		// 双引号值形态含转义引号（\"）——值字符集补「反斜杠转义的任意字符」，
+		// 否则 "a\"b" 只掩到内嵌引号、留下 b"} 半截残形（oagentkit/guardx#50）。
+		Re:   regexp.MustCompile(`(?i)\b(key)` + kvSeparator + `("(?:\\.|[^"\\\n])*")`),
 		Repl: `$1$2"****"`,
 	},
 	{
 		Name: "key-value-single-quoted",
 		Re:   regexp.MustCompile(`(?i)\b(key)` + kvSeparator + `('[^'\n]*')`),
 		Repl: `$1$2'****'`,
+	},
+	{
+		// 截断值兜底（oagentkit/guardx#50）：日志超长截断落在值的开引号之后
+		//（无收尾引号）时，闭引号规则全部失配 ⇒ 整值原文泄漏。掩码保留开
+		// 引号（`"****`）——掩值不改引号的有无，下游「值以引号收尾」的模式
+		// 仍可匹配。闭引号形态存在时本规则不命中（[^"\n]* 跨不过闭引号）。
+		Name: "key-value-double-quoted-truncated",
+		Re:   regexp.MustCompile(`(?i)\b(key)` + kvSeparator + `("[^"\n]*$)`),
+		Repl: `$1$2"****`,
+	},
+	{
+		Name: "key-value-single-quoted-truncated",
+		Re:   regexp.MustCompile(`(?i)\b(key)` + kvSeparator + `('[^'\n]*$)`),
+		Repl: `$1$2'****`,
+	},
+	{
+		// 整值掩（oagentkit/guardx#51）：凭证值本身是 JSON 数组/对象时，裸值
+		// 规则只吃到首个空白/引号（`****"a","b"]` 半截对象）；单层括号平衡
+		// 形态（含截断兜底）整值换掉——按字段名整值替换语义。
+		Name: "key-value-bracket",
+		Re:   regexp.MustCompile(`(?i)\b(key)` + kvSeparator + `(\[[^\]\n]*\]|\{[^\}\n]*\}|\[[^\]\n]*$|\{[^\}\n]*$)`),
+		Repl: `$1$2****`,
 	},
 	{
 		Name: "key-value",
@@ -141,13 +179,30 @@ var builtinRules = []Rule{
 		// `password: xxx` 形态；第九轮审计：password/token 此前漏在紧邻词表，
 		// 冒号后带空格即整体漏网）。值形态三拆的理由见 key-value 组。
 		Name: "credential-kv-double-quoted",
-		Re:   regexp.MustCompile(`(?i)` + credentialKeyPart + kvSeparator + `("[^"\n]*")`),
+		Re:   regexp.MustCompile(`(?i)` + credentialKeyPart + kvSeparator + `("(?:\\.|[^"\\\n])*")`),
 		Repl: `$1$2"****"`,
 	},
 	{
 		Name: "credential-kv-single-quoted",
 		Re:   regexp.MustCompile(`(?i)` + credentialKeyPart + kvSeparator + `('[^'\n]*')`),
 		Repl: `$1$2'****'`,
+	},
+	{
+		// 截断/括号整值兜底：语义同 key-value 组的同名规则（#50/#51），键面
+		// 换凭证词表。
+		Name: "credential-kv-double-quoted-truncated",
+		Re:   regexp.MustCompile(`(?i)` + credentialKeyPart + kvSeparator + `("[^"\n]*$)`),
+		Repl: `$1$2"****`,
+	},
+	{
+		Name: "credential-kv-single-quoted-truncated",
+		Re:   regexp.MustCompile(`(?i)` + credentialKeyPart + kvSeparator + `('[^'\n]*$)`),
+		Repl: `$1$2'****`,
+	},
+	{
+		Name: "credential-kv-bracket",
+		Re:   regexp.MustCompile(`(?i)` + credentialKeyPart + kvSeparator + `(\[[^\]\n]*\]|\{[^\}\n]*\}|\[[^\]\n]*$|\{[^\}\n]*$)`),
+		Repl: `$1$2****`,
 	},
 	{
 		Name: "credential-kv",
@@ -306,5 +361,10 @@ func RedactSecrets(s string, secrets ...string) string {
 // "abc123" 早已失去键上下文 ⇒ `{"password": "abc123"}` 原样透传（泄漏）。
 // 键感知打码补上这层：键名命中凭证词表（jsonCredentialKeyRe）即整值打码。
 func RedactValue(v any) any {
-	return redactWalk(v, nil)
+	return redactWalk(v, nil, ValueOptions{})
+}
+
+// RedactValueOpts 同 RedactValue，接受 ValueOptions（自定义键名判定等）。
+func RedactValueOpts(v any, opts ValueOptions) any {
+	return redactWalk(v, nil, opts)
 }

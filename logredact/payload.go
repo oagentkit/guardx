@@ -68,7 +68,7 @@ func RedactPayloadValue(v any, fields ...string) any {
 			set[f] = struct{}{}
 		}
 	}
-	return redactWalk(v, set)
+	return redactWalk(v, set, ValueOptions{})
 }
 
 // NewPayloadRedactor 返回可复用的「载荷裁剪 + 形状脱敏」函数（字段集与规则表
