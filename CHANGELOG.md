@@ -2,6 +2,70 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.18.0] — 2026-11-05
+
+### 新增(logredact)：JSON 结构保形脱敏 + 键表补 pwd 等缩写（#44 #45）
+
+#44（结构保形）：键值对按值形态三拆（双引号/单引号/裸），打码保留原分隔符
+与引号——JSON 行打码后仍是合法 JSON（此前 Repl 把分隔段吞成 =，冒号变等号、
+引号丢失，采集侧 JSON 解析器整行降级）。引号形态各自回填，避免单引号 kv
+内嵌在 JSON 字符串值里时向外交错注入双引号。新增 RedactJSON：合法 JSON 走
+键感知结构化路径（凭证词键整值打码、字符串值过文本规则、json.Number 保数字
+字面量、输出恒合法 JSON），非法 JSON 回落文本规则。RedactValue 升级为键感知
+——解码后的值失去键上下文，此前 {"password": "abc123"} 原样透传（泄漏）。
+#45（键表覆盖）：凭证词表补 pwd/pass/auth 缩写与 token/secret/password 复数
+形态——pwd=abc123 此前原样泄漏（passwd 命中、pwd 不命中）。over-mask 是安全
+方向的代价（bypass 类词尾命中已在注释挂账）。
+秩序修复：bearer/jwt/vendor 三组锚定凭据体自身的规则按「精确在前、宽泛在后」
+总原则提到键值对之前——auth 入词表后 kv 规则吃掉 auth=Bearer 锚点会让 JWT
+漏网（实测回归）；kv 裸值吞 scheme+已掩码体，输出收敛为单段掩码。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.34.1
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.34.0` | `v0.34.1` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.34.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.31.2` | `v0.34.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+
+## [v0.17.1] — 2026-11-04
+
+### 重构(permgate)：通配匹配正则编译缓存收编 oekit/pkg/cache SingleFlightCache（并发首编译去重、TTL=0 永不过期、显式禁空值缓存）；deps 地板 pkg v0.31.2
+
+- 47c28e1
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.31.0
+
+oekit 基座发了新版本（pkg v0.31.0 / concurrency v0.23.0 / logx v0.8.0）⇒ 本仓的
+依赖地板落后 ⇒ 抬到最新，让**下一次发版**不再带出落后地板（打 tag 时刻的地板
+必须是当时的最新——`verify_tag_floor` / `release.py doctor` 都在查这条）。
+兼容性实测：本仓只用这些基座包的少量 API ⇒ go build / go vet / go test -race
+全绿，**零行为差异**；go 指令未被顶起（本仓的 go 地板不动）。
+
+
 ## [v0.17.0] — 2026-10-28
 
 ### 新增(invoke)：动作层结论补第三格——这次演练若真跑，会不会跑
