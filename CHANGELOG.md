@@ -2,6 +2,53 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.19.0] — 2026-11-06
+
+### 新增(logredact)：Masker 结构化双视图 MaskValue/UnmaskValue——逐字符串值 walk 消序列化往返（#54）
+
+结构化数据回原值此前只能 json.Marshal → Mask/Restore → json.Unmarshal——
+正确性依赖两个未经类型化保证的假设：令牌只在字符串值里 / 字符串替换不
+破坏 JSON 结构。同包 Redact 已实证结构破坏面（#44：引号/冒号形态错位），
+逆向 Restore 的同款结构假设不再被要求。
+- MaskValue：键不动、逐字符串值 Mask（map/slice 下探、标量原样、输出为
+  副本不污染入参）
+- UnmaskValue：逐字符串值 Restore（展示面拿的是已反序列化结构，无
+  「替换破坏 JSON 文本」假设面）
+- Mask/Restore 文本面重构为 maskStringLocked/restoreStringLocked 单源，
+  与 walk 共用实现（消双份实现漂移）
+TestMaskerValueWalk：IPv4/注册串掩码、嵌套+数组+非字符串标量+键不动、
+入参不污染、逆视图回填、JSON 往返兼容。logredact 全量 -race 绿。
+关联 oagentkit/guardx#54
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+### 修复(logredact)：usage 计量字段误掩 / 掩值引号形状 / 复合键+整值掩+键名回调（#50 #51 #52）
+
+guardx#52——tokens? 后缀收窄（数据损坏方向静默错，比漏打更坏）：
+- tokens 复数只在「凭证前缀段 + tokens」（credTokenPrefix 枚举）或整键恰为
+  tokens 时命中；prompt_tokens/completion_tokens/total_tokens/cached_tokens/
+  reasoning_tokens 及 camelCase 变体（promptTokens 等）不再整值打码
+- 单数 *_token / xToken 保持全量命中（几乎恒为凭证）；裸复数 tokens JSON 面
+  保留（令牌池整键 ^tokens$）、文本面不命中（RE2 无环视，与 scout_tokens
+  无法区分——已知不对称，结构化载荷走 JSON 面）
+- JSON 键面词表拆开声明（jsonCredentialSuffixGeneral）：分隔符收 [-_] 全集，
+  修复共用文本面常量带入的窄分隔符（x-api-key kebab 形态此前会被漏判）
+guardx#50——掩值保引号形状：
+- 掩码保留值原本的引号（kvSeparator 保形 v0.17 已做，本批补钉子）
+- 新增截断值兜底规则：日志截断落在开引号后（无收尾引号）时 v0.18.0 全部
+  失配 ⇒ 整值原文泄漏；掩码保留开引号（掩值不改引号有无，下游「值以引号
+  收尾」模式仍可匹配）
+- 双引号值形态补转义感知（\\.）："a\\"b" 不再留下 b"} 半截残形
+guardx#51——复合键/整值掩/键名回调：
+- 新增括号整值规则：凭证值是 JSON 数组/对象时整值换掉（含截断兜底），
+  不再啃出 ****"a","b"] 半截对象
+- 暴露 IsCredentialKey 内置键名谓词 + ValueOptions.IsCredentialKey 回调
+  （RedactValueOpts / RedactJSONOpts）：集成方喂自己的判定，替掉为兜自家
+  键形态维护的绕行脱敏器；回调只加不减（内置「值必被打码」承诺不松动）
+新增 issue_fix_test.go 回归钉子（四组形态 + 存量承诺不回退）；
+logredact 全量 -race 绿。
+关联 oagentkit/guardx#50 oagentkit/guardx#51 oagentkit/guardx#52
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
 ## [v0.18.0] — 2026-11-05
 
 ### 新增(logredact)：JSON 结构保形脱敏 + 键表补 pwd 等缩写（#44 #45）
