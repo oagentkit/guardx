@@ -1,5 +1,10 @@
 package egress
 
+import (
+	"context"
+	"net/netip"
+)
+
 // Policy 放行面（**具名值**）。
 //
 // # 为什么要有这个类型
@@ -63,6 +68,7 @@ var (
 // Check 校验完整 URL 的 host（放行面 = 本值；解析失败 fail-closed）。
 //
 // 与 CheckWith 等价——同一个值派生，语义不可能与写面分叉。
+// ⚠️ 不解析域名（零 DNS 防护），LLM 可控 URL 场景用 CheckResolving。
 func (p Policy) Check(rawURL string) error {
 	return CheckWith(rawURL, p)
 }
@@ -70,6 +76,15 @@ func (p Policy) Check(rawURL string) error {
 // CheckHost 校验 host（放行面 = 本值；空值 fail-closed；非 IP 字面量放行）。
 //
 // 与 CheckHostWith 等价——同一个值派生，语义不可能与写面分叉。
+// ⚠️ 不解析域名（零 DNS 防护），LLM 可控 URL 场景用 CheckHostResolving。
 func (p Policy) CheckHost(host string) error {
 	return CheckHostWith(host, p)
+}
+
+// CheckResolving 解析校验完整 URL：域名解析后全部结果逐个过本放行面的
+// IP 策略（语义与 fail-closed 口径见包级 CheckResolving）。
+//
+// 与包级 CheckResolving 等价——同一个值派生，写面与拨号层不可能分叉。
+func (p Policy) CheckResolving(ctx context.Context, rawURL string, r Resolver) ([]netip.Addr, error) {
+	return CheckResolving(ctx, rawURL, p, r)
 }

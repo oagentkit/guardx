@@ -40,6 +40,12 @@ func EscapeUntrusted(s string) string {
 		case strings.HasPrefix(trimmed, "|"):
 			// 表格行（| --- | 伪造"汇总表"是常见注入形态）
 			inject = true
+		case isPipeTableLine(trimmed):
+			// GFM 表格行前导 | 可选（#67）：`name | score` 与分隔行
+			// `--- | ---` 同样能立表格——尤其分隔行，没有它整张伪造表
+			// 都不成立，必须中和。含 " | " 的普通行误伤代价只是行首一个
+			// 零宽空格（渲染不变样），与放过伪造表格的代价不可比。
+			inject = true
 		case strings.HasPrefix(trimmed, "[") && strings.Contains(trimmed, "]:"):
 			// 引用定义 [ref]: url，可劫持后文 [text][ref] 的渲染
 			inject = true
@@ -57,6 +63,24 @@ func EscapeUntrusted(s string) string {
 		b.WriteString(line)
 	}
 	return b.String()
+}
+
+// isPipeTableLine 无前导 | 的 GFM 表格行判定（#67）：
+//   - 分隔行形态：只剩 | : - 空格（如 "--- | ---"、"---|---"、":-:|-:"）——
+//     GFM 表格必须有分隔行才成立，把它中和掉，伪造的表就立不起来；
+//   - 行内含 " | "（两侧带空格的管道，如 "name | score"）：GFM 的前导 |
+//     与尾 | 都是可选的，这类行可作表头/表体。
+//
+// 无空格的 "a|b" 形态刻意不判：分隔行已被上一条覆盖（表格没有分隔行不成表），
+// 而无空格竖线在正常文本（代码说明、正则）里出现频率高，误伤面大于安全收益。
+func isPipeTableLine(trimmed string) bool {
+	if !strings.Contains(trimmed, "|") {
+		return false
+	}
+	if strings.Trim(trimmed, "|:-= ") == "" {
+		return true // 分隔行形态（= 一并容纳，与水平线判定字符集对齐）
+	}
+	return strings.Contains(trimmed, " | ")
 }
 
 // isOrderedMarker 行首是否为有序列表标记（"12. xxx"）。

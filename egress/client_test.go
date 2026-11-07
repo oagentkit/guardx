@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
@@ -223,4 +224,91 @@ func TestNewClientRejectsForeignRoundTripper(t *testing.T) {
 		}
 	}()
 	PublicOnly.MustClient(base)
+}
+
+// TestNewClientGuardsLegacyDialTLS 回归（#74）：只设了废弃 DialTLS（未设
+// DialTLSContext）的传输器，HTTPS 走 DialTLS——此前守卫只挂 DialContext，
+// 这类传输器的 HTTPS 整路绕过拨号围栏。守卫必须先判后拨：被拒地址不得
+// 触达调用方自带的 DialTLS。
+func TestNewClientGuardsLegacyDialTLS(t *testing.T) {
+	var mu sync.Mutex
+	var dialed []string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+
+	base := srv.Client()
+	tr := base.Transport.(*http.Transport)
+	//nolint:staticcheck // SA1019：测试刻意只设废弃的 DialTLS 字段——钉住本条回归的场景
+	tr.DialTLS = func(network, addr string) (net.Conn, error) {
+		mu.Lock()
+		dialed = append(dialed, addr)
+		mu.Unlock()
+		return dialTLSDial(srv, tr, network, addr)
+	}
+	c := PublicOnly.MustClient(base)
+	resp, err := c.Get(srv.URL)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("PublicOnly 应拦住回环的 HTTPS 拨号")
+	}
+	var blocked *BlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("拒绝原因应是 *BlockedError，实际 %T：%v", err, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(dialed) != 0 {
+		t.Fatalf("判定应在拨号之前：被拒地址不该触达 DialTLS（dialed=%v）", dialed)
+	}
+}
+
+// TestNewClientKeepsLegacyDialTLS 放行面上，被守卫包住的废弃 DialTLS 仍要
+// 真正被使用——守卫的语义是「先判后拨」，不是「丢弃调用方的拨号器」。
+func TestNewClientKeepsLegacyDialTLS(t *testing.T) {
+	var mu sync.Mutex
+	hits := 0
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+
+	base := srv.Client()
+	tr := base.Transport.(*http.Transport)
+	//nolint:staticcheck // SA1019：同上，钉住「只设废弃 DialTLS」的输入形态
+	tr.DialTLS = func(network, addr string) (net.Conn, error) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		return dialTLSDial(srv, tr, network, addr)
+	}
+	c := SelfService.MustClient(base)
+	resp, err := c.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("SelfService 应放行回环 HTTPS：%v", err)
+	}
+	_ = resp.Body.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	if hits == 0 {
+		t.Fatal("放行时调用方自带的 DialTLS 应被保留并使用")
+	}
+}
+
+// dialTLSDial 模拟一个真实的 DialTLS 实现：TCP 拨号后包 tls.Client 完成
+// TLS 化（DialTLS 契约：返回的连接由调用方负责 TLS，net/http 不再补握手）。
+func dialTLSDial(srv *httptest.Server, tr *http.Transport, network, addr string) (net.Conn, error) {
+	raw, err := (&net.Dialer{}).Dial(network, addr)
+	if err != nil {
+		return nil, err
+	}
+	host, _, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		_ = raw.Close()
+		return nil, splitErr
+	}
+	cfg := tr.TLSClientConfig.Clone()
+	cfg.ServerName = host
+	return tls.Client(raw, cfg), nil
 }

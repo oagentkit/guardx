@@ -118,3 +118,38 @@ func TestCheckInvalidInput(t *testing.T) {
 		t.Error("空白 host 应 fail-closed")
 	}
 }
+
+// TestCheckSchemeAllowlist 回归（#61）：scheme 走白名单而非黑名单——凡有
+// host 的非 http(s) scheme（file/gopher/ftp/ws…）与空 scheme（相对 URL）
+// 一律拒绝。此前 gopher://evil.test/ 这类 URL 走「域名不解析→放行」分支，
+// SSRF 围栏整段不生效。
+func TestCheckSchemeAllowlist(t *testing.T) {
+	blocked := []string{
+		"file://localhost/etc/passwd", // 有 host 的 file 形态
+		"gopher://evil.test/_FLUSHALL",
+		"ftp://corp.example/pub",
+		"ws://evil.test/socket",
+		"example.com/relative", // 空 scheme（相对 URL）
+	}
+	for _, u := range blocked {
+		if err := Check(u); err == nil {
+			t.Errorf("%s 非 http(s) scheme 应阻断", u)
+			continue
+		}
+		var be *BlockedError
+		if !errors.As(Check(u), &be) {
+			t.Errorf("%s 应为 BlockedError", u)
+		}
+		if err := CheckWith(u, Policy{}); err == nil {
+			t.Errorf("%s CheckWith 同样应阻断", u)
+		}
+	}
+	// http/https 照常；scheme 大小写由 url.Parse 归一
+	for _, u := range []string{"http://example.com/", "https://example.com/", "HTTP://example.com/"} {
+		if err := Check(u); err != nil {
+			t.Errorf("%s http(s) 不应因 scheme 被拒: %v", u, err)
+		}
+	}
+	// file:///etc/passwd（无 host）已被空 host 兜住，scheme 白名单只是把
+	// 拒绝原因从「空 host」提前到「scheme」——不再单独断言其错误文本。
+}

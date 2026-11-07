@@ -42,11 +42,26 @@ func SanitizeBody(body string) string {
 	})
 }
 
+// sourceEscaper source 属性值的实体转义（#68）：source 进的是双引号属性值，
+// `"` 闭合属性、`<` 伪造标签、`>` 提前闭合开标签——其后文本都会变成顶层
+// prompt 内容。& 必须最先替换，否则后续产出的实体会被二次转义。
+// 用 strings.NewReplacer 单遍完成（先列先匹配，天然避免二次转义）。
+var sourceEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	`"`, "&quot;",
+	"'", "&apos;",
+)
+
 // Wrap 以统一通道包裹系统带外注入：`<system-reminder source="…">…</system-reminder>`。
+//
+// source 若来自配置面（工具名/MCP server 名）而非编译期常量，同样是不可信
+// 输入——它被做属性级实体转义后才进 source="…"，杜绝属性逃逸。
 func Wrap(source, body string) string {
 	var b strings.Builder
 	b.WriteString(`<system-reminder source="`)
-	b.WriteString(SanitizeBody(source))
+	b.WriteString(sourceEscaper.Replace(source))
 	b.WriteString(`">` + "\n")
 	b.WriteString(SanitizeBody(strings.TrimSpace(body)))
 	b.WriteString("\n</system-reminder>")

@@ -55,9 +55,18 @@ func (p Policy) NewClient(base *http.Client) (*http.Client, error) {
 	//nolint:staticcheck // SA1019：Dial 虽已废弃，但仍要读它——DialContext 为 nil 而 Dial 非 nil 时，
 	// net/http 会走 Dial；不读就会静默丢弃调用方自带的拨号器（改走默认拨号器）。
 	origDial := clone.Dial
-	origTLS := clone.DialTLSContext
+	origTLSCtx := clone.DialTLSContext
+	//nolint:staticcheck // SA1019：DialTLS 同为废弃字段，同样要读——DialTLSContext 为 nil 而
+	// DialTLS 非 nil 时，net/http 对 HTTPS 走 DialTLS；不读它，HTTPS 整路绕过拨号守卫。
+	origTLS := clone.DialTLS
 	clone.DialContext = p.guardDial(origDialCtx, origDial)
-	clone.DialTLSContext = p.guardDialTLS(origTLS)
+	clone.DialTLSContext = p.guardDialTLS(origTLSCtx, origTLS)
+	// 守卫已包进 DialTLSContext（net/http 优先取它），废弃字段清零——
+	// 留着只会给「这条传输器到底走没走守卫」留下一个永远读不到的岔路。
+	//nolint:staticcheck // SA1019：清零同样是「使用」废弃字段，理由与上面的读取一致
+	clone.Dial = nil
+	//nolint:staticcheck // SA1019：同上
+	clone.DialTLS = nil
 	out := *base
 	out.Transport = clone
 	return &out, nil
@@ -102,19 +111,33 @@ func (p Policy) guardDial(
 	}
 }
 
-// guardDialTLS 同样给 TLS 拨号加判定——否则自定义了 DialTLSContext 的传输器
-// 会绕开拨号守卫（那是覆盖面上的洞，不是语义分歧）。
+// guardDialTLS 同样给 TLS 拨号加判定——否则自定义了 DialTLSContext（或废弃的
+// DialTLS）的传输器会绕开拨号守卫（那是覆盖面上的洞，不是语义分歧）。
+//
+// tlsCtx 与 tls 都为 nil 时返回 nil（交回 net/http 的缺省拨号路径，该路径
+// 已由 DialContext 上的守卫覆盖）。tlsCtx 为 nil 而 tls 非 nil 时把废弃的
+// 无 ctx 形态包一层，与 guardDial 对待废弃 Dial 的方式对称。
 func (p Policy) guardDialTLS(
-	tls func(context.Context, string, string) (net.Conn, error),
+	tlsCtx func(context.Context, string, string) (net.Conn, error),
+	tls func(string, string) (net.Conn, error),
 ) func(context.Context, string, string) (net.Conn, error) {
-	if tls == nil {
+	inner := tlsCtx
+	switch {
+	case inner != nil:
+		// 调用方自带 TLS 拨号器：原样保留，只在外面加判定。
+	case tls != nil:
+		// 废弃的 DialTLS 字段（无 ctx）：包一层成 DialTLSContext 形态。
+		inner = func(_ context.Context, network, addr string) (net.Conn, error) {
+			return tls(network, addr)
+		}
+	default:
 		return nil
 	}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if err := p.checkDialAddr(addr); err != nil {
 			return nil, err
 		}
-		return tls(ctx, network, addr)
+		return inner(ctx, network, addr)
 	}
 }
 
