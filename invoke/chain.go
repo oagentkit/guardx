@@ -171,11 +171,16 @@ type StageResult struct {
 // 少一条则等于这次调用没发生过。
 //
 // 一条留痕里有**两层结论**（门禁层 / 动作层），缺一层审计就答不全问题：
-// Allowed / Err 是门禁判了什么，Outcome 是事情做没做。见 Outcome 的说明。
+// Allowed / Err 是门禁层结论（是否放行到达了执行体 / 收口原因），
+// Outcome 是动作层结论（事情做没做）。见 Outcome 的说明。
 type Record struct {
-	Call    Call
-	Stages  []StageResult
-	Allowed bool // 是否真的到达了执行体
+	Call   Call
+	Stages []StageResult
+	// Allowed 是否真的到达了执行体（#73）：**到达即置位，与执行成败无关**——
+	// 「已到达但出错」（副作用已施加、回包失败）是审计上最危险的结局，
+	// 记成「未放行」会让读者以为门禁拦下了它。成败由 Err 表达：
+	// Allowed=true 且 Err!=nil 即「执行体跑过但失败」。
+	Allowed bool
 	// Outcome 动作层结论：执行体自己声明的「事情做没做」，原样抄自 Result.Outcome。
 	//
 	// nil ⇒ 执行体未声明 ⇒ 按「执行了」处理。
@@ -204,8 +209,9 @@ func (r Record) DryRun() bool {
 // 判定表：
 //
 //   - Outcome != nil ⇒ 按执行体的声明判（声明优先）：拒绝 ⇒ false，演练 ⇒ false。
-//   - Outcome == nil ⇒ 未声明：调用成功收口（Err == nil）按「执行了」处理，
-//     失败收口按「没动」处理。
+//   - Outcome == nil ⇒ 未声明：按 Allowed 兜底——门禁拦下（Allowed=false）⇒
+//     没动；到达过执行体（Allowed=true）⇒ 动了（#73 保守化：哪怕收口带错，
+//     执行体已经跑过，副作用可能已施加，审计面宁可记「动了」也不记「没动」）。
 //
 // 「声明优先」是关键：执行体说自己做了什么，就以它为准——只有它没说时，
 // 才由链按收口结果兜底。否则「执行体动了手但回包失败」这类结局会被链
@@ -214,7 +220,7 @@ func (r Record) Acted() bool {
 	if r.Outcome != nil {
 		return r.Outcome.Acted()
 	}
-	return r.Err == nil
+	return r.Allowed
 }
 
 // ChainOption 链构造选项。
@@ -372,6 +378,10 @@ func (c *Chain) Do(ctx context.Context, call Call) (res Result, err error) {
 	}
 
 	res, err = runHandler(ctx, c.handler, call)
+	// 到达执行体是既成事实（#73）：Allowed 在 runHandler 返回后立即置位，
+	// 与成败无关——「已到达但出错」（副作用已施加、回包失败）被记成
+	// 「未放行」是审计面的系统性误报。成败由 Err 表达。
+	rec.Allowed = true
 	// 动作层结论先抄进留痕，再看错误：即使下面要丢弃 Result（错误路径返回零值），
 	// 留痕里也必须留着「执行体说了什么」——否则「工具自己拒了、但它用的是 error
 	// 返回」这一类结局在审计面仍退化成「执行了」。
@@ -379,7 +389,6 @@ func (c *Chain) Do(ctx context.Context, call Call) (res Result, err error) {
 	if err != nil {
 		return Result{}, err
 	}
-	rec.Allowed = true
 	rec.OutBytes = len(res.Text) + len(res.Structured)
 	return res, nil
 }

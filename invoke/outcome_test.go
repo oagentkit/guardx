@@ -152,10 +152,13 @@ func TestOutcomeSurvivesHandlerError(t *testing.T) {
 	}
 }
 
-// TestRecordActedFallsBackToErrorWhenUndeclared 钉住「未声明时的兜底」。
+// TestRecordActedFallsBackToAllowedWhenUndeclared 钉住「未声明时的兜底」（#73 保守化）。
 //
-// 执行体既没声明、调用又失败收口 ⇒ 按「没动」处理。
-func TestRecordActedFallsBackToErrorWhenUndeclared(t *testing.T) {
+// 执行体既没声明、调用又失败收口 ⇒ 按 Allowed 兜底：门禁拦下 ⇒ 没动；
+// 到达过执行体（哪怕报错收口）⇒ 动了——「已到达但出错」时副作用可能已施加，
+// 记成「没动」是审计面系统性误报（Err!=nil ⇒ 没动 的旧兜底恰好在最危险的
+// 结局上说谎）。
+func TestRecordActedFallsBackToAllowedWhenUndeclared(t *testing.T) {
 	_, rec := recordOf(t, func(context.Context, Call) (Result, error) {
 		return Result{}, errors.New("执行体炸了")
 	})
@@ -163,8 +166,20 @@ func TestRecordActedFallsBackToErrorWhenUndeclared(t *testing.T) {
 	if rec.Outcome != nil {
 		t.Fatal("执行体未声明 ⇒ 不得凭空长出结论")
 	}
-	if rec.Acted() {
-		t.Fatal("未声明且失败收口 ⇒ 按「没动」处理")
+	if !rec.Allowed {
+		t.Fatal("执行体已被到达 ⇒ Allowed 必须为 true（与成败无关）")
+	}
+	if !rec.Acted() {
+		t.Fatal("未声明且已到达执行体 ⇒ 按「动了」保守处理")
+	}
+
+	// 门禁拦下（未到达执行体）⇒ 没动
+	var denied Record
+	c, _ := NewChain(okHandler(new(int)), []Stage{deny("gate", false)},
+		WithRecorder(func(r Record) { denied = r }))
+	_, _ = c.Do(context.Background(), Call{Name: "t"})
+	if denied.Allowed || denied.Acted() {
+		t.Fatalf("门禁拦下 ⇒ Allowed=false 且没动，实得 allowed=%v acted=%v", denied.Allowed, denied.Acted())
 	}
 }
 

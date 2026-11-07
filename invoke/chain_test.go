@@ -211,19 +211,22 @@ func TestExactlyOneRecordPerOutcome(t *testing.T) {
 	handlerPanic := func(context.Context, Call) (Result, error) { panic("体炸") }
 
 	cases := []struct {
-		name    string
-		stages  []Stage
-		handler Handler
-		call    Call
-		allowed bool
+		name      string
+		stages    []Stage
+		handler   Handler
+		call      Call
+		allowed   bool
+		succeeded bool
 	}{
-		{"放行", []Stage{allow("g")}, ok, Call{Name: "t"}, true},
-		{"拒绝", []Stage{deny("g", false)}, ok, Call{Name: "t"}, false},
-		{"阶段报错", []Stage{stageErr}, ok, Call{Name: "t"}, false},
-		{"阶段 panic", []Stage{stagePanic}, ok, Call{Name: "t"}, false},
-		{"执行体报错", []Stage{allow("g")}, boom, Call{Name: "t"}, false},
-		{"执行体 panic", []Stage{allow("g")}, handlerPanic, Call{Name: "t"}, false},
-		{"空名", []Stage{allow("g")}, ok, Call{}, false},
+		{"放行", []Stage{allow("g")}, ok, Call{Name: "t"}, true, true},
+		{"拒绝", []Stage{deny("g", false)}, ok, Call{Name: "t"}, false, false},
+		{"阶段报错", []Stage{stageErr}, ok, Call{Name: "t"}, false, false},
+		{"阶段 panic", []Stage{stagePanic}, ok, Call{Name: "t"}, false, false},
+		// #73：执行体已被到达 ⇒ Allowed=true（成败由 Err 表达）——
+		// 「已到达但出错」记成「未放行」是审计面系统性误报。
+		{"执行体报错", []Stage{allow("g")}, boom, Call{Name: "t"}, true, false},
+		{"执行体 panic", []Stage{allow("g")}, handlerPanic, Call{Name: "t"}, true, false},
+		{"空名", []Stage{allow("g")}, ok, Call{}, false, false},
 	}
 
 	for _, tc := range cases {
@@ -248,13 +251,45 @@ func TestExactlyOneRecordPerOutcome(t *testing.T) {
 				t.Fatalf("Allowed 应为 %v，实得 %v", tc.allowed, r.Allowed)
 			}
 			// 失败结局必须带 Err：一条没有 Err 的失败记录读起来和成功记录没区别。
-			if !tc.allowed && r.Err == nil {
+			if !tc.succeeded && r.Err == nil {
 				t.Fatal("失败留痕必须带 Err")
 			}
-			if tc.allowed && r.Err != nil {
+			if tc.succeeded && r.Err != nil {
 				t.Fatalf("放行留痕不该带 Err，实得 %v", r.Err)
 			}
 		})
+	}
+}
+
+// TestRecordAllowedMeansReached 回归（#73）：Allowed 的语义是「是否真的到达
+// 执行体」，到达即置位、与成败无关。最危险的结局——「命令已投递、回包失败」
+// ——此前被记成 Allowed=false + Err=执行错误，审计读者会得出「门禁拦下了它」
+// 的结论，而事实上工具已经跑过；叠加 Acted 的旧兜底（Err!=nil ⇒ 没动），
+// 整条留痕读起来像「什么都没发生」。
+func TestRecordAllowedMeansReached(t *testing.T) {
+	var got Record
+	c, err := NewChain(
+		func(_ context.Context, c Call) (Result, error) {
+			// 模拟「副作用已施加、回包失败」：投递成功但随后报错
+			return Result{}, errors.New("回包失败：连接已被对端重置")
+		},
+		[]Stage{allow("gate")},
+		WithRecorder(func(r Record) { got = r }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Do(context.Background(), Call{Name: "deploy"}); err == nil {
+		t.Fatal("执行体报错应向上返回错误")
+	}
+	if !got.Allowed {
+		t.Fatal("已到达执行体 ⇒ Allowed 必须为 true（与成败无关）")
+	}
+	if got.Err == nil {
+		t.Fatal("失败收口必须留 Err（成败由 Err 表达）")
+	}
+	if !got.Acted() {
+		t.Fatal("已到达且未声明 Outcome ⇒ Acted 按「动了」保守处理")
 	}
 }
 
