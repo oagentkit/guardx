@@ -69,19 +69,25 @@ func TestRedactWithBuiltInWins(t *testing.T) {
 
 // 扩展规则与内置规则是**互补**关系：内置没覆盖的形态由扩展兜住。
 func TestRedactWithExtendsCoverage(t *testing.T) {
-	const blob = "blob=deadbeefdeadbeefdeadbeefdeadbeef"
-	// 内置表没有「长十六进制」这一档 → 原文不动
+	// 长十六进制已在 guardx#75 收编内置（agent-memory 生产实证形态）——
+	// 此处换「消费方自定义厂商前缀」形态钉「扩展兜底」语义。
+	const blob = "ztnet=corp-abc123def456ghij"
 	if out := Redact(blob); out != blob {
-		t.Fatalf("内置表不应命中长 hex，得到 %q", out)
+		t.Fatalf("内置表不应命中自定义厂商前缀，得到 %q", out)
 	}
 	extra := []Rule{{
-		Name: "long-hex",
-		Re:   regexp.MustCompile(`(?i)\b[0-9a-f]{32,}\b`),
+		Name: "corp-prefix",
+		Re:   regexp.MustCompile(`\bcorp-[0-9a-z]{16}\b`),
 		Repl: "****",
 	}}
 	out := RedactWith(blob, extra)
-	if strings.Contains(out, "deadbeef") {
+	if strings.Contains(out, "abc123def456") {
 		t.Fatalf("扩展规则未生效，得到 %q", out)
+	}
+	// 收编后长 hex 由内置表兜住（#75 回归钉子）
+	const hexBlob = "blob=deadbeefdeadbeefdeadbeefdeadbeef"
+	if out := Redact(hexBlob); strings.Contains(out, "deadbeef") {
+		t.Fatalf("长 hex 应由内置表命中，得到 %q", out)
 	}
 }
 
