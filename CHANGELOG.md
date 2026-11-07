@@ -2,6 +2,32 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.22.0] — 2026-11-07
+
+### 新增(egress)：新增 Policy.CheckRedirect——逐跳 URL 判定 + 跳数上限（guardx#87 残余面）
+
+写面（Check / CheckWith）只判首跳 URL；NewClient 的拨号层守卫兜住了重定向
+目标，但它有两个结构性盲点（都是包文档自己写明的开放边界）：
+- 调用方自带的传输器不是 *http.Transport（otelhttp / 重试 / 认证包装都是
+  RoundTripper 包装）⇒ NewClient 直接返回错误，本包内没有任何逐跳路径；
+- 走代理时拨号地址是代理地址 ⇒ 拨号层看不到目标，而写面在重定向时只判了
+  首跳，于是这一段是裸的。
+故补 Policy.CheckRedirect(req, via)，直接赋给 http.Client.CheckRedirect：
+逐跳走与写面**同一份**判定（新增 checkURL / checkURLWith 抽出共用体，避免
+「首跳拒、重定向放」的不对称），并在同一函数里承担跳数上限（一旦设置
+CheckRedirect，net/http 不再套用自己的默认 10 跳上限——只判 URL 不判跳数
+等于顺手把跳数保护关掉）。上限固定取 10、不另开旋钮：两个上限并存时谁生效
+取决于调用点，口径必然漂。
+用例 egress/redirect_test.go 5 条（拒云元数据 / 放公网 / 拒非 http(s) /
+跳数差一格 / 接线真拦得住）。三处变异均已反向验证为**断言失败**而非编译
+失败：判据体换成 return nil（3 红）、>= 改 >（跳数 1 红）、scheme 判定加
+&& false（1 红）。
+
+- 杂务(build)：补统一 Makefile——本地 ci 门禁与共享 CI 同口径（agentkit#138）
+
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+
 ## [v0.21.0] — 2026-11-07
 
 ### 新增(sandbox,egressproxy)：出站档位词表落到 tier 0 + 本地强制代理（兑现面）
