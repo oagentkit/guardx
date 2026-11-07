@@ -161,19 +161,9 @@ close #72 — map[string]string 输入静默放弃内容匹配
 - 默认拒绝语义未弱化：#58 的 break-glass 只认配置级白名单，硬禁（disallowed/project deny）位次不动；allow 侧改动全部朝「更难放行」方向。
 - 错误处理/日志/并发/命名遵循 AGENTS.md（判定链无 error 返回路径，维持 Decision 契约；无裸 `go func`；`-race` 回归齐备）。
 
-- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.36.0
+- 杂务(deps)：依赖地板追到最新——oekit/pkg v0.36.0
 
-| 依赖 | 现地板 | 抬到 |
-|---|---|---|
-| `github.com/oekit/pkg` | `v0.35.2` | `v0.36.0` |
-## 为什么
-矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
-（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
-oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
-## 兼容性实测
-本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
-与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
-只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+tag 前地板对齐:github.com/oekit/pkg v0.35.2 → v0.36.0(第一方基座,零第三方依赖约束不变)。
 
 - 杂务(deps)：依赖地板追到最新——oekit/pkg v0.35.2
 
