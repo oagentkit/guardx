@@ -2,6 +2,28 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.23.0] — 2026-11-07
+
+### 新增(permgate)：subjectKeys/工具名等价外置可配,deny 规则目标失配 fail-loud（#86）
+
+库层不再烘焙 ZCode 领域词汇（与 llm#67 同根因）：
+- Service.SubjectKeys：工具输入参与内容匹配的字段名清单可配，零值=内置
+  6 键（command/url/file_path/path/pattern/patch_text，向后兼容）；形态
+  特判（command 拆段、file_path/path Clean）跟随键名本身，自定义键单段
+  原样匹配。godoc 明示清单是 ZCode 惯例，其他字段命名的宿主必须配置。
+- Service.ToolEquivalence：工具名等价钩子，nil=DefaultToolEquivalence
+  （原判定链里写死的 Edit 规则→Write 特例提取为导出缺省实现，单向语义
+  不变）；钩子是替换不是叠加。
+- Service.OnConfigWarn：deny 内容规则在「输入是 map/struct 形态但提取不
+  出清单内任何 subject 字段」的调用上无法评估时回调告警（fail-loud，
+  deny 静默死字是最坏失效形态）；默认 no-op；allow/ask 失配落 ask 兜底
+  本就保守不告警，字符串/nil 输入未携带字段化内容亦不告警。
+- 三个可配置面均在 snapshot 锁内解析零值，Check 路径零分叉；并发契约
+  不变（装配期字段/Update 换新值）。
+测试：自定义清单生效与内置键语义保留、零值=显式 6 键逐字一致、等价钩
+子生效/nil 缺省/替换语义、失配告警正反例与三段 deny 入口，全部表驱动。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
 ## [v0.22.0] — 2026-11-07
 
 ### 新增(egress)：新增 Policy.CheckRedirect——逐跳 URL 判定 + 跳数上限（guardx#87 残余面）
