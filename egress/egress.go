@@ -1,10 +1,19 @@
 // Package egress 出口围栏：LLM 可控 URL 的字面量层 SSRF 防护——阻断指向
 // 本机/私网/保留段的 IP 字面量与 localhost 域，放行普通域名。
 //
+// ⚠️ **域名 = 零 DNS 防护**：Check / CheckHost 系列对域名不做解析，私网/
+// 云元数据/CGNAT 等 IP 策略可被「解析到内网的域名」全量绕过，也没有任何
+// DNS-rebinding 防护。**LLM 可控 URL 的场景请用 CheckResolving /
+// CheckHostResolving**（域名解析后逐 IP 过同一套策略，解析失败与命中
+// 禁止段都 fail-closed，并返回已检地址供调用方钉住拨号），或叠加
+// Policy.NewClient 的拨号层守卫。放行域名是 preflight 快筛的取舍，不是
+// 安全结论——把 Check 当「URL 安全检查」用等于零防护。
+//
 // 对标 ZCode webfetch-egress-guard.ts：
 //   - 只做字面量判定，不对域名做 DNS preflight——部分网络 1s 内解析不完会
 //     误杀公网目标（解析层防护由消费方按需叠加，如自定义 DialContext 的
-//     Control 钩子二次校验解析结果）；
+//     Control 钩子二次校验解析结果；需要本包出解析判定时用
+//     CheckResolving）；
 //   - IPv4-mapped IPv6（::ffff:0:0/96）与 NAT64 well-known prefix
 //     （64:ff9b::/96）先还原内嵌 IPv4 再套同一套 IPv4 策略——这是绕过
 //     IP 围栏的经典逃逸路径；
@@ -53,21 +62,48 @@ func (e *BlockedError) Error() string {
 }
 
 // Check 校验完整 URL 的 host（解析失败 fail-closed）。
+//
+// ⚠️ 只校验 http(s)（scheme 白名单见 checkScheme）且**不解析域名**——
+// 域名可被解析到内网，LLM 可控 URL 场景请用 CheckResolving。
 func Check(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("egress: URL 解析失败: %w", err)
 	}
+	if err := checkScheme(u); err != nil {
+		return err
+	}
 	return CheckHost(u.Hostname())
 }
 
 // CheckWith 校验完整 URL 的 host（放行面语义见 Policy；解析失败 fail-closed）。
+//
+// ⚠️ 只校验 http(s)（scheme 白名单见 checkScheme）且**不解析域名**——
+// 域名可被解析到内网，LLM 可控 URL 场景请用 CheckResolving。
 func CheckWith(rawURL string, p Policy) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("egress: URL 解析失败: %w", err)
 	}
+	if err := checkScheme(u); err != nil {
+		return err
+	}
 	return CheckHostWith(u.Hostname(), p)
+}
+
+// checkScheme scheme 白名单（fail-closed）：egress 的判定面是「LLM 可控的
+// fetch 类 URL」，只认 http/https——其余 scheme（file/gopher/ftp/ws…）与
+// 空 scheme（相对 URL）一律拒绝。校验面收窄成白名单而不是黑名单，是因为
+// 出一个新 scheme 就得重新评估一遍「它的 host 语义是否被 Hostname() 覆盖」，
+// 白名单让没评估过的形态默认过不去。
+func checkScheme(u *url.URL) error {
+	if u.Scheme == "http" || u.Scheme == "https" {
+		return nil
+	}
+	return &BlockedError{
+		Host:   u.Host,
+		Reason: fmt.Sprintf("scheme %q 不在白名单（仅 http/https）", u.Scheme),
+	}
 }
 
 // CheckHostWith 校验 host（放行面语义见 Policy；放行位仅作用于私网与
@@ -79,6 +115,9 @@ func CheckHostWith(host string, p Policy) error {
 
 // CheckHost 校验 host（URL hostname 或去端口/括号后的 host 字面量）。
 // 空值 fail-closed；非 IP 字面量（域名）放行——见包注释的 preflight 取舍。
+//
+// ⚠️ 域名不解析＝对「解析到内网的域名」零防护，LLM 可控 URL 场景请用
+// CheckHostResolving。
 func CheckHost(host string) error {
 	return checkHost(host, Policy{})
 }
@@ -88,7 +127,7 @@ func checkHost(host string, p Policy) error {
 	if h == "" {
 		return fmt.Errorf("egress: 空 host")
 	}
-	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+	if isLocalhostDomain(h) {
 		if p.AllowLoopback {
 			return nil // localhost 域即回环的域形态——探测本机自建服务是
 			// AllowLoopback 的文档场景（第八轮审计：开关拒掉最典型的
@@ -105,8 +144,19 @@ func checkHost(host string, p Policy) error {
 		if looksLikeExoticIPv4(h) {
 			return &BlockedError{Host: h, Reason: "exotic IPv4 字面量形态"}
 		}
-		return nil // 域名：不解析
+		return nil // 域名：不解析（解析变体见 CheckHostResolving）
 	}
+	effective, reason := addrPolicy(addr, p)
+	if reason != "" {
+		return &BlockedError{Host: h, Addr: effective.String(), Reason: reason}
+	}
+	return nil
+}
+
+// addrPolicy 单个地址过 IP 策略，返回载体归一后的地址与命中原因（空即放行）。
+// 字面量判定与解析判定共用这一份——两处各排一遍只会漂移出
+// 「字面量拒、解析结果放行」的缝。
+func addrPolicy(addr netip.Addr, p Policy) (netip.Addr, string) {
 	effective := addr
 	if addr.Is6() && !addr.Is4In6() {
 		if v4, ok := unwrapNAT64(addr); ok {
@@ -114,15 +164,10 @@ func checkHost(host string, p Policy) error {
 		}
 	}
 	if effective.Is4() || effective.Is4In6() {
-		if reason := ipv4Policy(effective.Unmap(), p); reason != "" {
-			return &BlockedError{Host: h, Addr: effective.Unmap().String(), Reason: reason}
-		}
-		return nil
+		effective = effective.Unmap()
+		return effective, ipv4Policy(effective, p)
 	}
-	if reason := ipv6Policy(effective, p); reason != "" {
-		return &BlockedError{Host: h, Addr: effective.String(), Reason: reason}
-	}
-	return nil
+	return effective, ipv6Policy(effective, p)
 }
 
 // normalizeHost 小写/去空白/去 IPv6 括号/去尾点（DNS 大小写不敏感 + FQDN 尾点归一）。
@@ -132,6 +177,12 @@ func normalizeHost(host string) string {
 		h = h[1 : len(h)-1]
 	}
 	return strings.TrimSuffix(h, ".")
+}
+
+// isLocalhostDomain localhost 域判定（本体与任意子域）——字面量判定与
+// 解析判定共用同一份口径。
+func isLocalhostDomain(h string) bool {
+	return h == "localhost" || strings.HasSuffix(h, ".localhost")
 }
 
 // unwrapNAT64 还原 NAT64/DNS64 well-known prefix（64:ff9b::/96）内嵌的 IPv4；
