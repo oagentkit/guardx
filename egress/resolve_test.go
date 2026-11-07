@@ -94,8 +94,7 @@ func TestCheckResolvingLiteralHosts(t *testing.T) {
 		t.Fatal("私网 IP 字面量应阻断（与 CheckHost 同口径）")
 	}
 	// NAT64 载体归一后回带 IPv4 形态
-	got, err = CheckHostResolving(context.Background(), "64:ff9b::7f00:1", Policy{}, nil)
-	if err == nil {
+	if _, err := CheckHostResolving(context.Background(), "64:ff9b::7f00:1", Policy{}, nil); err == nil {
 		t.Fatal("NAT64 内嵌回环应阻断")
 	}
 	// exotic 词法在解析前就拒（进了 resolver 会被 inet_aton 解析成回环）

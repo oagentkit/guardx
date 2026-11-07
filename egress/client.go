@@ -63,7 +63,9 @@ func (p Policy) NewClient(base *http.Client) (*http.Client, error) {
 	clone.DialTLSContext = p.guardDialTLS(origTLSCtx, origTLS)
 	// 守卫已包进 DialTLSContext（net/http 优先取它），废弃字段清零——
 	// 留着只会给「这条传输器到底走没走守卫」留下一个永远读不到的岔路。
+	//nolint:staticcheck // SA1019：清零同样是「使用」废弃字段，理由与上面的读取一致
 	clone.Dial = nil
+	//nolint:staticcheck // SA1019：同上
 	clone.DialTLS = nil
 	out := *base
 	out.Transport = clone
