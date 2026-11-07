@@ -2,7 +2,9 @@ package wire
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -181,5 +183,150 @@ func TestStartCarriesBindingsAndBudget(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("子侧未收到 Start")
+	}
+}
+
+// ---- #79：启动通道两条挂起路径都要被 ctx 兜住 ----
+
+// TestStarterStartReturnsOnCtxExpiry 子程序活着但不回帧：Start 必须在 ctx 到期时返回（#79）。
+//
+// 威胁面正是 wire 隔离的对象：被注入的劣化程序死循环、不回 Result、不关管道。
+// 修前阻塞读永远不醒，父侧执行协程永久挂死；修后 100ms 期限处必然拿到
+// 类型化错误（errors.Is 可判 DeadlineExceeded）。
+func TestStarterStartReturnsOnCtxExpiry(t *testing.T) {
+	// net.Pipe：全双工同步管道且是 io.ReadWriteCloser——Close 能解除对端的阻塞读。
+	parent, child := net.Pipe()
+	defer func() { _ = child.Close() }()
+	defer func() { _ = parent.Close() }()
+
+	// 子侧读走 Start 帧后装死：不回 Result、不关连接。
+	go func() {
+		var start Start
+		if err := ReadFrame(child, &start); err != nil {
+			return
+		}
+		var extra Start
+		_ = ReadFrame(child, &extra) // 装死：一直等下一帧（父侧断连才醒）
+	}()
+
+	st := NewStarter(parent)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	type outcome struct {
+		res Result
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := st.Start(ctx, Start{Program: "while(true){}", ResultID: "r-1"})
+		done <- outcome{res, err}
+	}()
+	select {
+	case o := <-done:
+		if o.err == nil {
+			t.Fatal("ctx 到期必须返回错误（子程序未回报结果）")
+		}
+		if !errors.Is(o.err, context.DeadlineExceeded) {
+			t.Errorf("错误应可按 ctx 期限判定（errors.Is DeadlineExceeded），实得 %v", o.err)
+		}
+		if !strings.Contains(o.err.Error(), "ctx 到期") {
+			t.Errorf("错误信息应说明 ctx 到期，实得 %q", o.err.Error())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start 忽略 ctx：子程序装死时父侧永久挂死（观测窗 2s）")
+	}
+}
+
+// TestStarterStartWritePhaseHonorsCtx 子侧连 Start 帧都不读：写阶段同样挂死，ctx 必须兜住（#79）。
+func TestStarterStartWritePhaseHonorsCtx(t *testing.T) {
+	parent, child := net.Pipe()
+	defer func() { _ = child.Close() }()
+	defer func() { _ = parent.Close() }()
+
+	// 子侧完全不读（同步管道的写在等第一个读者）。
+	go func() {
+		var extra Start
+		_ = ReadFrame(child, &extra) // 等到连接被父侧关闭
+	}()
+
+	st := NewStarter(parent)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	begin := time.Now()
+	_, err := st.Start(ctx, Start{Program: "x", ResultID: "r-1"})
+	elapsed := time.Since(begin)
+	if err == nil {
+		t.Fatal("写阶段挂死也必须在 ctx 到期时返回错误")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("错误应可按 ctx 期限判定，实得 %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("写阶段未被 ctx 兜住，耗时 %v", elapsed)
+	}
+}
+
+// TestStarterStartWithFutureDeadlineStillSucceeds 远期 ctx 不影响正常回环（#79）。
+//
+// ctx 消费只兜「挂死」象限：子侧正常回帧时，带期限的 ctx 不改变结果。
+func TestStarterStartWithFutureDeadlineStillSucceeds(t *testing.T) {
+	child, parent, cleanup := channelPair()
+	defer cleanup()
+
+	go func() {
+		rn := NewRunner(child)
+		start, err := rn.AwaitStart(context.Background())
+		if err != nil {
+			return
+		}
+		_ = rn.SendResult(Result{ResultID: start.ResultID, OK: true, Value: "done"})
+	}()
+
+	st := NewStarter(parent)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := st.Start(ctx, Start{Program: "p", ResultID: "r-9"})
+	if err != nil {
+		t.Fatalf("正常回环不应被远期 ctx 打断: %v", err)
+	}
+	if !res.OK || res.Value != "done" {
+		t.Fatalf("结果不对: %+v", res)
+	}
+}
+
+// TestRunnerAwaitStartHonorsCtxCancel 父侧永不下发：子侧 AwaitStart 在 ctx 取消时必返回（#79）。
+func TestRunnerAwaitStartHonorsCtxCancel(t *testing.T) {
+	parent, child := net.Pipe()
+	defer func() { _ = child.Close() }()
+	defer func() { _ = parent.Close() }()
+
+	// 父侧永不发帧；挂在读上等子侧断连（让 goroutine 能收尾）。
+	go func() {
+		var extra Start
+		_ = ReadFrame(parent, &extra)
+	}()
+
+	rn := NewRunner(child)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := rn.AwaitStart(ctx)
+		done <- err
+	}()
+	// 50ms 后取消（不用 sleep 轮询，用定时器触发）。
+	timer := time.AfterFunc(50*time.Millisecond, cancel)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("ctx 取消必须返回错误（父侧未下发）")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("错误应可按 ctx 取消判定（errors.Is Canceled），实得 %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("AwaitStart 忽略 ctx：父侧不下发时子侧永久挂死（观测窗 2s）")
 	}
 }

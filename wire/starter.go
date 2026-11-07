@@ -20,48 +20,128 @@ import (
 // 启动是一次性的（发一帧 Start、收一帧 Result），工具调用是多次的
 // （N 次 Request/Response）。混在一条连接上则「读到的那帧是哪种」要靠猜。
 // 故 Starter 用自己的连接；后端起子进程时开两条管道（启动 + 调用）。
+//
+// # ctx 兜底（#79）
+//
+// 子程序**活着但不回帧**（死循环、被注入的劣化代码——正是 wire 隔离的威胁面）
+// 时管道不会自己断，阻塞读永远不会醒：ctx 到期/取消时本类型会**主动关掉底层
+// 连接**（实现 io.Closer 时）——一来解除阻塞中的读写，二来让子侧读到 EOF 自行
+// 终止（不变量 5：管道关闭本身就是最强的取消信号）。故 Start 在「ctx 超时」
+// 与「连接断开」两种情形下都**必然返回错误**，不会挂死。
+//
+// 底层连接不实现 io.Closer 时 ctx 路径仍会返回，但阻塞中的读 goroutine 要等
+// 连接自然断开才退出；后端装配时请给启动通道一条可关的连接。
 type Starter struct {
 	// w 写端（Start 帧从这里出去）。
 	w io.Writer
 	// r 读端（Result 帧从这里进来）。
 	r io.Reader
+	// closer 底层连接（实现 io.Closer 时）。ctx 兜底与重复关闭都用它。
+	closer io.Closer
+	// closeOnce 连接只关一次。
+	closeOnce sync.Once
 	// writeMu 串行化写。
 	writeMu sync.Mutex
 }
 
 // NewStarter 构造父侧启动器。
 func NewStarter(rw io.ReadWriter) *Starter {
-	return &Starter{w: rw, r: rw}
+	s := &Starter{w: rw, r: rw}
+	if c, ok := rw.(io.Closer); ok {
+		s.closer = c
+	}
+	return s
+}
+
+// closeConn 关底层连接（幂等；无可关连接时为空操作）。
+//
+// ctx 兜底路径专用：连接断开既是给子侧的取消信号（不变量 5），
+// 也是解除本侧阻塞读写的唯一手段（同步管道没有别的打断办法）。
+func (s *Starter) closeConn() {
+	if s.closer == nil {
+		return
+	}
+	s.closeOnce.Do(func() {
+		// 关连接产生的错误没有可采取的动作（连接本来就在被丢弃），
+		// 记入忽略——这不是吞判定错误，是停机路径。
+		_ = s.closer.Close()
+	})
 }
 
 // Start 发送启动帧并等待子侧回报结果。
 //
 // 一次性语义：一次 Start 对应一次执行。子侧跑完（成功、失败、或被内核杀掉
-// 都没回帧）时，父侧会在 ctx 超时或连接断开时拿到错误——**「子进程被 OOM 杀掉」
-// 正是这条路径**：管道 EOF，不是「程序返回空」。
+// 都没回帧）时，父侧会在 ctx 超时或连接断开时拿到错误——**「子进程被 OOM
+// 杀掉」正是这条路径**：管道 EOF，不是「程序返回空」。
+//
+// ctx 到期或取消时**必然返回**（#79）：先关底层连接（可关时）解除阻塞、
+// 通知子侧终止，再返回包装了 ctx.Err() 的错误。写帧阶段（子侧连 Start
+// 都不读）同样被 ctx 兜住。
 func (s *Starter) Start(ctx context.Context, start Start) (Result, error) {
 	if err := checkStart(&start); err != nil {
 		return Result{}, err
 	}
 	start.V = Version
-	s.writeMu.Lock()
-	err := WriteFrame(s.w, start)
-	s.writeMu.Unlock()
-	if err != nil {
+	// 写阶段也要可中断：同步管道（io.Pipe / net.Pipe / OS 管道）的写
+	// 与读一样会因对端装死而永久阻塞。
+	if err := s.writeStart(ctx, start); err != nil {
 		return Result{}, err
 	}
-	var res Result
-	if err := ReadFrame(s.r, &res); err != nil {
-		return Result{}, fmt.Errorf("wire: 执行域异常终止（未回报结果）: %w", err)
+	return s.awaitResult(ctx, start.ResultID)
+}
+
+// writeStart 在 ctx 约束下写出 Start 帧。
+func (s *Starter) writeStart(ctx context.Context, start Start) error {
+	type outcome struct{ err error }
+	done := make(chan outcome, 1)
+	goSafe(func() {
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
+		done <- outcome{err: WriteFrame(s.w, start)}
+	})
+	select {
+	case o := <-done:
+		return o.err
+	case <-ctx.Done():
+		// 关连接解除阻塞中的写（对端装死、永远不读 Start 时）。
+		s.closeConn()
+		<-done // 等写 goroutine 退出（close 后必返回），不泄漏。
+		return fmt.Errorf("wire: 发送启动帧时 ctx 到期（子侧未接收）: %w", ctx.Err())
 	}
-	if err := checkVersion(res.V); err != nil {
-		return Result{}, err
+}
+
+// awaitResult 在 ctx 约束下等待子侧的 Result 帧。
+func (s *Starter) awaitResult(ctx context.Context, resultID string) (Result, error) {
+	type outcome struct {
+		res Result
+		err error
 	}
-	if err := checkResult(&res); err != nil {
-		return Result{}, err
+	done := make(chan outcome, 1)
+	goSafe(func() {
+		var res Result
+		err := ReadFrame(s.r, &res)
+		done <- outcome{res: res, err: err}
+	})
+	select {
+	case o := <-done:
+		if o.err != nil {
+			return Result{}, fmt.Errorf("wire: 执行域异常终止（未回报结果）: %w", o.err)
+		}
+		if err := checkVersion(o.res.V); err != nil {
+			return Result{}, err
+		}
+		if err := checkResult(&o.res); err != nil {
+			return Result{}, err
+		}
+		if o.res.ResultID != resultID {
+			return Result{}, fmt.Errorf("wire: 结果标识不匹配：期望 %s，收到 %s", resultID, o.res.ResultID)
+		}
+		return o.res, nil
+	case <-ctx.Done():
+		// 子程序活着但不回帧：管道不会自己断，必须父侧主动断。
+		// 关连接同时解除阻塞中的读，之后子侧读到 EOF 自行终止（不变量 5）。
+		s.closeConn()
+		<-done // 等读 goroutine 退出（close 后必返回），不泄漏。
+		return Result{}, fmt.Errorf("wire: 等待执行结果时 ctx 到期（子程序未回报）: %w", ctx.Err())
 	}
-	if res.ResultID != start.ResultID {
-		return Result{}, fmt.Errorf("wire: 结果标识不匹配：期望 %s，收到 %s", start.ResultID, res.ResultID)
-	}
-	return res, nil
 }
