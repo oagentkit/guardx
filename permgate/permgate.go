@@ -32,10 +32,20 @@
 //
 // 规则内容匹配（对标 matchesRuleContent）：精确 / `prefix:*` 前缀（prefix 或
 // prefix+空白开头——空白含换行，换行同属命令分隔）/ `*` 通配（跨行透明）。
-// 匹配对象从工具输入提取（command/url/file_path/path/pattern/patch_text 字段
-// 或字符串输入本身）；类型化输入（map[string]string、struct 及其字段/json tag）
-// 同样参与提取（#65/#72：此前这些形态静默落空，内容级 deny 对类型化调用方
-// 全部失配——fail-open）。
+// 匹配对象从工具输入提取（字段名按 Service.SubjectKeys 清单，缺省
+// command/url/file_path/path/pattern/patch_text，或字符串输入本身）；类型化
+// 输入（map[string]string、struct 及其字段/json tag）同样参与提取（#65/#72：
+// 此前这些形态静默落空，内容级 deny 对类型化调用方全部失配——fail-open）。
+//
+// ⚠️ subject 键清单是 ZCode 的领域词汇惯例（#86）：上述 6 键只是缺省值，不是
+// 普遍契约。工具输入 schema 用其他字段名（cmd/script/target …）的宿主**必须**
+// 配置 Service.SubjectKeys 声明自己的匹配对象字段——清单外字段是匹配盲区，
+// 内容级 deny 规则对它们静默失效（规则还在配置里、审计显示「未命中 deny」，
+// 实为死字且零报错，是 deny 规则最坏的失效形态）。为此 deny 档的失配另有
+// fail-loud 出口：输入是 map/struct 形态却提取不出任何 subject 面时，经
+// Service.OnConfigWarn 回调显式暴露（allow/ask 失配落 ask 兜底本就保守，
+// 不告警）。工具名等价（Edit 规则匹配 Write 的写面特例）同样外置：
+// Service.ToolEquivalence 钩子，nil = DefaultToolEquivalence（即原特例）。
 //
 // 复合命令（#62/#71）：command 形态的匹配对象先按 shell 操作符（`&&` `||`
 // `;` `|` 换行，引号内不拆）拆段，段级命中的量词按规则极性取 fail-closed 侧
@@ -48,6 +58,7 @@ package permgate
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -93,7 +104,8 @@ type Capability struct {
 
 // Rule 单条许可规则。
 type Rule struct {
-	// ToolName 工具名；Edit 规则同时匹配 Write（写面等价，对标 ZCode 特例）。
+	// ToolName 工具名；等价工具名按 Service.ToolEquivalence 判定（nil =
+	// DefaultToolEquivalence：Edit 规则匹配 Write 的写面等价，ZCode 特例）。
 	ToolName string
 	// Content 输入内容模式（command/url/路径）：空 = 该工具全部调用；
 	// "git status:*" 前缀（空白边界，命令形态专用）；含 * 通配；否则精确等值。
@@ -121,10 +133,11 @@ type Decision struct {
 //
 // 并发契约（issue #66）：Check/AllowForSession/ResetSession/Update/SessionAllows
 // 之间并发安全——Check 全程只读锁内快照，Update 在锁内整体换配置。导出的
-// 配置字段（AllowedTools/DisallowedTools/ProjectRules/Preapprove）视为**装配期
-// 字段**：直接赋值只允许发生在并发使用开始前；运行期热更新一律经 Update
-// 换**新值**（不得原地改切片元素——快照共享底层数组，原地改与并发读仍构成
-// 竞争），也不得在 Update 回调里再调本包方法（非重入锁，会死锁）。
+// 配置字段（AllowedTools/DisallowedTools/ProjectRules/Preapprove/SubjectKeys/
+// ToolEquivalence/OnConfigWarn）视为**装配期字段**：直接赋值只允许发生在并发
+// 使用开始前；运行期热更新一律经 Update 换**新值**（不得原地改切片元素——
+// 快照共享底层数组，原地改与并发读仍构成竞争），也不得在 Update 回调里再调
+// 本包方法（非重入锁，会死锁）。
 type Service struct {
 	// AllowedTools 配置级白名单（工具名集合）。break-glass 位次（#58）：
 	// 运维显式加白压过只读档与 project ask，但压不过 disallowed/project deny。
@@ -136,30 +149,71 @@ type Service struct {
 	// Preapprove 预批钩子（WebFetch URL 白名单类）：返回非空 ruleID 即放行。
 	// 判定位次在项目 allow 之后、配置白名单之后（plan 拦截压得过预批）。
 	Preapprove func(ctx context.Context, tool string, input any) (ruleID string, ok bool)
+	// SubjectKeys 工具输入里参与内容匹配的字段名清单（#86）。零值/空 = 内置
+	// 6 键 command/url/file_path/path/pattern/patch_text（ZCode 领域词汇惯例，
+	// 向后兼容）。⚠️ 工具输入 schema 用其他字段名（cmd/script/target …）的
+	// 宿主**必须**配置本清单：清单外字段是匹配盲区，内容级规则对它们静默
+	// 失配；deny 规则的这类失配经 OnConfigWarn fail-loud。清单按声明顺序
+	// 提取；形态特判跟随键名本身——名为 command 的键仍按复合命令拆段、
+	// file_path/path 仍先 filepath.Clean，清单里的自定义键按单段原样匹配
+	// （命令形态的字段建议沿用内置名 command，或由宿主拆段后匹配）。
+	SubjectKeys []string
+	// ToolEquivalence 工具名等价钩子（#86）：a 为规则声明的工具名、b 为实际
+	// 调用的工具名，等价（规则应覆盖该调用）返回 true——精确相等无需钩子。
+	// nil = DefaultToolEquivalence（Edit 规则匹配 Write 的写面等价，ZCode
+	// 特例降级为缺省实现）。宿主工具命名不同（EditFile/ApplyPatch …）时
+	// 声明自己的写面等价，不必为每个变体名重复配规则。钩子是**替换**不是
+	// 叠加：配置后 ZCode 特例不再自动生效，需要就写进自己的实现里。
+	ToolEquivalence func(a, b string) bool
+	// OnConfigWarn 配置疑点告警回调（#86 fail-loud）：本包无日志依赖，宿主
+	// 经它接自己的日志/计数面。当前唯一告警点——deny 内容规则在「输入是
+	// map/struct 形态但提取不出清单内任何 subject 字段」的调用上无法评估：
+	// 该规则对此调用形同虚设，而后续档位可能放行。默认 no-op（零值可用）。
+	// 回调在 Check 路径上同步触发且可能并发，必须轻量并自行保证并发安全；
+	// 告警频度（同一规则反复触发）由宿主去重。allow/ask 失配落 ask 兜底
+	// 本就保守，不告警。
+	OnConfigWarn func(msg string)
 
 	mu           sync.Mutex
 	sessionRules Ruleset
 }
 
 // config Check 全程持有的配置快照（#66）：锁内取，锁外只读——热更新经 Update
-// 整体换值后，进行中的判定仍基于取快照时刻的一致视图。
+// 整体换值后，进行中的判定仍基于取快照时刻的一致视图。subjectKeys/equiv/warn
+// 是三个可配置面（#86）的**解析结果**：零值已在 snapshot 落到缺省实现
+// （defaultSubjectKeys / DefaultToolEquivalence / no-op），判定路径上不再做
+// 零值分叉。
 type config struct {
-	allowed    map[string]bool
-	disallowed map[string]bool
-	project    Ruleset
-	preapprove func(context.Context, string, any) (string, bool)
+	allowed     map[string]bool
+	disallowed  map[string]bool
+	project     Ruleset
+	preapprove  func(context.Context, string, any) (string, bool)
+	subjectKeys []string
+	equiv       func(a, b string) bool
+	warn        func(msg string)
 }
 
 // snapshot 锁内拷贝配置（map 引用 + 三个 slice 头，浅拷贝即可——Update 语义
-// 要求换新值而非原地改）。
+// 要求换新值而非原地改）。#86 的三个可配置面在这里一并解析零值。
 func (s *Service) snapshot() config {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	keys := s.SubjectKeys
+	if len(keys) == 0 {
+		keys = defaultSubjectKeys
+	}
+	equiv := s.ToolEquivalence
+	if equiv == nil {
+		equiv = DefaultToolEquivalence
+	}
 	return config{
-		allowed:    s.AllowedTools,
-		disallowed: s.DisallowedTools,
-		project:    s.ProjectRules,
-		preapprove: s.Preapprove,
+		allowed:     s.AllowedTools,
+		disallowed:  s.DisallowedTools,
+		project:     s.ProjectRules,
+		preapprove:  s.Preapprove,
+		subjectKeys: keys,
+		equiv:       equiv,
+		warn:        s.OnConfigWarn,
 	}
 }
 
@@ -211,7 +265,7 @@ func (s *Service) checkAlwaysAsk(cfg config, tool string, input any, mode Mode, 
 	if d, hit := hardDeny(cfg, tool, input); hit {
 		return d
 	}
-	if matchRules(s.sessionRuleSet().Allow, Allow, tool, input) {
+	if matchRules(s.sessionRuleSet().Allow, Allow, tool, input, cfg) {
 		return decision(Allow, "rule.session.allow", "本会话已授权: "+tool)
 	}
 	if readonlyWrite(mode, cap) {
@@ -244,7 +298,7 @@ func hardDeny(cfg config, tool string, input any) (Decision, bool) {
 	if cfg.disallowed[tool] {
 		return decision(Deny, "rule.disallowedTools", "工具被显式禁用: "+tool), true
 	}
-	if matchRules(cfg.project.Deny, Deny, tool, input) {
+	if matchRules(cfg.project.Deny, Deny, tool, input, cfg) {
 		return decision(Deny, "rule.project.deny", "项目规则拒绝: "+tool), true
 	}
 	return Decision{}, false
@@ -257,7 +311,7 @@ func (s *Service) checkStandard(ctx context.Context, cfg config, tool string, in
 	switch {
 	case cfg.disallowed[tool]:
 		return decision(Deny, "rule.disallowedTools", "工具被显式禁用: "+tool)
-	case matchRules(cfg.project.Deny, Deny, tool, input):
+	case matchRules(cfg.project.Deny, Deny, tool, input, cfg):
 		return decision(Deny, "rule.project.deny", "项目规则拒绝: "+tool)
 	case cfg.allowed[tool]:
 		// 配置白名单 break-glass（#58）：运维显式加白是「比模式更强的信任」
@@ -271,27 +325,27 @@ func (s *Service) checkStandard(ctx context.Context, cfg config, tool string, in
 		return readonlyDeny(tool)
 	case mode == ModeYolo:
 		return decision(Allow, "mode.yolo", "yolo 模式直通")
-	case matchRules(cfg.project.Ask, Ask, tool, input):
+	case matchRules(cfg.project.Ask, Ask, tool, input, cfg):
 		return decision(Ask, "rule.project.ask", "项目规则要求确认: "+tool)
 	case mode == ModeReadOnly:
 		if cap.ReadOnly {
 			return decision(Allow, "mode.read_only", "只读模式放行只读工具")
 		}
 		return readonlyDeny(tool)
-	case matchRules(cfg.project.Allow, Allow, tool, input):
+	case matchRules(cfg.project.Allow, Allow, tool, input, cfg):
 		return decision(Allow, "rule.project.allow", "项目规则放行: "+tool)
 	}
 	if ruleID, ok := preapproved(ctx, cfg, tool, input); ok {
 		return decision(Allow, ruleID, "预批放行: "+tool)
 	}
-	return s.checkFallback(tool, input, cap)
+	return s.checkFallback(cfg, tool, input, cap)
 }
 
 // checkFallback 兜底段：会话授权 → 只读放行 → 默认确认。
 // （配置白名单已前移至 checkStandard 的 break-glass 位次。）
-func (s *Service) checkFallback(tool string, input any, cap Capability) Decision {
+func (s *Service) checkFallback(cfg config, tool string, input any, cap Capability) Decision {
 	switch {
-	case matchRules(s.sessionRuleSet().Allow, Allow, tool, input):
+	case matchRules(s.sessionRuleSet().Allow, Allow, tool, input, cfg):
 		// 会话授权同样覆盖普通工具的 ask 兜底（比 ZCode 只在 alwaysAsk 段查
 		// 会话规则更完整——用户点了「总是允许」不该再被问）
 		return decision(Allow, "rule.session.allow", "本会话已授权: "+tool)
@@ -353,31 +407,89 @@ func (s *Service) sessionRuleSet() *Ruleset {
 
 // matchRules 任一规则命中即 true。pol 为规则所在档位：决定复合命令拆段后的
 // 段级量词（Allow=每段命中，Deny/Ask=任一段命中——各自的 fail-closed 侧）。
-func matchRules(rules []Rule, pol Behavior, tool string, input any) bool {
-	faces := subjects(input, tool)
+//
+// #86 fail-loud：deny 档且规则带内容、而输入是 map/struct 形态却提取不出任何
+// subject 面（字段名全在 SubjectKeys 清单外——宿主 schema 与清单脱节）时，
+// 该规则对此调用形同虚设且判定会流向后续档位——这是 deny 规则最坏的失效形态
+// （静默死字），经 cfg.warn 显式暴露。allow/ask 失配落 ask 兜底本就保守，
+// 不告警；字符串/nil 输入不告警（前者本身即匹配对象，后者根本没带内容，
+// 「带内容的规则对它们失配」是规则与工具形态的正常错位，不是清单盲区）。
+func matchRules(rules []Rule, pol Behavior, tool string, input any, cfg config) bool {
+	faces := subjects(input, cfg.subjectKeys)
 	for _, r := range rules {
-		if matchToolName(r.ToolName, tool) && matchRuleContent(r.Content, faces, pol) {
+		if !matchToolName(r.ToolName, tool, cfg.equiv) {
+			continue
+		}
+		if matchRuleContent(r.Content, faces, pol) {
 			return true
+		}
+		if pol == Deny && r.Content != "" && len(faces) == 0 && structuredInput(input) && cfg.warn != nil {
+			cfg.warn(fmt.Sprintf(
+				"permgate: 工具 %s 的 deny 内容规则 %q 无法评估——输入不含 subject 清单内任何字段（清单=%v）；"+
+					"若输入 schema 用其他字段名，请配置 Service.SubjectKeys",
+				tool, r.Content, cfg.subjectKeys))
 		}
 	}
 	return false
 }
 
-func matchToolName(ruleTool, tool string) bool {
+// matchToolName 工具名匹配：精确相等，或等价钩子判定。钩子已在 snapshot 解析
+// （nil → DefaultToolEquivalence，即原「Edit 规则匹配 Write」ZCode 特例，#86
+// 把它从判定链烘焙改为宿主可配）。
+func matchToolName(ruleTool, tool string, equiv func(a, b string) bool) bool {
 	if ruleTool == tool {
 		return true
 	}
-	// 写面等价：Edit 规则匹配 Write（对标 ZCode 同款特例）
-	return tool == "Write" && ruleTool == "Edit"
+	return equiv(ruleTool, tool)
 }
 
-// subjectKeys 工具输入里承载「匹配对象」的字段名（与 ruleSubjects 清单同步）。
+// DefaultToolEquivalence 写面等价的缺省实现（#86 外置；对标 ZCode 同款特例）：
+// Edit 规则匹配 Write 调用——两个工具是同一「写文件」入口的两种形态，针对
+// Edit 书写的规则对 Write 同样生效。**单向**：Write 规则不匹配 Edit（规则按
+// 其声明的入口书写）。a 为规则声明的工具名，b 为实际调用的工具名；精确相等
+// 不经本函数（matchToolName 先判）。宿主工具命名不同（EditFile/ApplyPatch …）
+// 时经 Service.ToolEquivalence 换上自己的等价语义。
+func DefaultToolEquivalence(ruleTool, tool string) bool {
+	return ruleTool == "Edit" && tool == "Write"
+}
+
+// structuredInput 输入是否为字段化形态（map / struct，解指针后判断）。
+// #86 的失配告警只看这类输入：字符串输入本身即匹配对象（永远有面），nil/标量
+// 输入根本没带内容——「带内容的 deny 规则对它们失配」是规则与工具形态的正常
+// 错位，告警只会制造噪音；只有「输入带了字段、字段名却全在清单外」才是
+// SubjectKeys 脱节的信号。
+func structuredInput(input any) bool {
+	switch input.(type) {
+	case map[string]any, map[string]string:
+		return true
+	}
+	rv := reflect.ValueOf(input)
+	for rv.IsValid() && rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return false
+		}
+		rv = rv.Elem()
+	}
+	if !rv.IsValid() {
+		return false
+	}
+	switch rv.Kind() {
+	case reflect.Map, reflect.Struct:
+		return true
+	}
+	return false
+}
+
+// defaultSubjectKeys Service.SubjectKeys 零值对应的缺省清单（与 ruleSubjects
+// 清单同步）。⚠️ 这是 ZCode 的领域词汇惯例（#86），不是普遍契约：工具输入
+// schema 用其他字段名的宿主必须配置 Service.SubjectKeys，否则清单外字段是
+// 匹配盲区（deny 规则静默失效——该失效形态的 fail-loud 出口见 matchRules）。
 // file_path/path 类 subject 先 filepath.Clean 再匹配：wildcard 路径规则
 // （"/repo/data/*"）可被 `..` 穿越与重复分隔符绕过，Clean 后
 // "/repo/data/../../etc/passwd" 归一为 "/etc/passwd"，不再误命中（fail-closed；
 // 第六轮审计）。符号链接绕过须执行器侧 EvalSymlinks 治理——本包不做文件系统
 // 访问，保持纯函数判定。command 字段按复合命令拆段（#62），其余字段单段。
-var subjectKeys = []string{"command", "url", "file_path", "path", "pattern", "patch_text"}
+var defaultSubjectKeys = []string{"command", "url", "file_path", "path", "pattern", "patch_text"}
 
 // pathSubjectKeys 匹配前须 Clean 的路径类字段。
 var pathSubjectKeys = map[string]bool{"file_path": true, "path": true}
@@ -389,30 +501,34 @@ const commandKey = "command"
 // 单段。面内多段来自同一条 shell 命令串的拆分，量词语义见 matchRuleContent。
 type subjectFace []string
 
-// subjects 从工具输入提取匹配对象（对标 ruleSubjects 的字段清单）。
+// subjects 从工具输入提取匹配对象（对标 ruleSubjects 的字段清单，键名按 keys
+// ——Check 路径传 snapshot 解析后的清单；keys 为空时落缺省，直调兜底）。
 // 多面语义（v0.10.38）：同一输入的 command/url/file_path/… 全部参与匹配——
 // 此前命中首个字段即返回，含 command+file_path 的输入里路径规则永不生效。
 // 类型化输入（#65/#72）：map[string]string 与 struct（含指针、匿名嵌入、
 // json tag）同样按字段名提取——此前静默落 nil，内容级 deny 对类型化调用方
 // 全部失配（fail-open，实测 deny 绕过）。
-func subjects(input any, tool string) []subjectFace {
+func subjects(input any, keys []string) []subjectFace {
+	if len(keys) == 0 {
+		keys = defaultSubjectKeys
+	}
 	switch v := input.(type) {
 	case string:
 		// 字符串输入本身即命令形态（bash 类工具的主通道）——同样拆段，
 		// 否则 #62/#71 的复合形态从主入口绕过。
 		return []subjectFace{subjectFace(splitCommand(v))}
 	case map[string]any:
-		return mapSubjects(func(key string) (string, bool) { s, ok := v[key].(string); return s, ok })
+		return mapSubjects(keys, func(key string) (string, bool) { s, ok := v[key].(string); return s, ok })
 	case map[string]string:
-		return mapSubjects(func(key string) (string, bool) { s, ok := v[key]; return s, ok })
+		return mapSubjects(keys, func(key string) (string, bool) { s, ok := v[key]; return s, ok })
 	}
-	return reflectSubjects(input)
+	return reflectSubjects(input, keys)
 }
 
-// mapSubjects 按 subjectKeys 顺序（确定性遍历，command 优先）从 lookup 提取。
-func mapSubjects(lookup func(string) (string, bool)) []subjectFace {
+// mapSubjects 按 keys 顺序（确定性遍历，command 优先）从 lookup 提取。
+func mapSubjects(keys []string, lookup func(string) (string, bool)) []subjectFace {
 	var faces []subjectFace
-	for _, key := range subjectKeys {
+	for _, key := range keys {
 		if s, ok := lookup(key); ok && s != "" {
 			faces = append(faces, keyFace(key, s))
 		}
@@ -432,9 +548,9 @@ func keyFace(key, s string) subjectFace {
 }
 
 // reflectSubjects 类型化输入的兜底提取（#65）：struct（解指针、含匿名嵌入）
-// 按 json tag/字段名对 subjectKeys 提取 string 字段；string 键的 map 提取
-// string 值。提取不到返回 nil（该输入确实不含内容字段）。
-func reflectSubjects(input any) []subjectFace {
+// 按 json tag/字段名对 keys 提取 string 字段；string 键的 map 提取 string 值。
+// 提取不到返回 nil（该输入确实不含内容字段）。
+func reflectSubjects(input any, keys []string) []subjectFace {
 	rv := reflect.ValueOf(input)
 	for rv.IsValid() && rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
@@ -447,12 +563,12 @@ func reflectSubjects(input any) []subjectFace {
 	}
 	switch rv.Kind() {
 	case reflect.Struct:
-		return structSubjects(rv, 3) // 限深防病态自嵌套
+		return structSubjects(rv, keys, 3) // 限深防病态自嵌套
 	case reflect.Map:
 		if rv.Type().Key().Kind() != reflect.String {
 			return nil
 		}
-		return mapSubjects(func(key string) (string, bool) {
+		return mapSubjects(keys, func(key string) (string, bool) {
 			mv := rv.MapIndex(reflect.ValueOf(key))
 			if !mv.IsValid() {
 				return "", false
@@ -463,13 +579,13 @@ func reflectSubjects(input any) []subjectFace {
 	return nil
 }
 
-// structSubjects 按 subjectKeys 顺序提取 struct 的 string 字段。
-func structSubjects(rv reflect.Value, depth int) []subjectFace {
+// structSubjects 按 keys 顺序提取 struct 的 string 字段。
+func structSubjects(rv reflect.Value, keys []string, depth int) []subjectFace {
 	if depth <= 0 {
 		return nil
 	}
 	var faces []subjectFace
-	for _, key := range subjectKeys {
+	for _, key := range keys {
 		if s, ok := structFieldString(rv, key, depth); ok {
 			faces = append(faces, keyFace(key, s))
 		}
