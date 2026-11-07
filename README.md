@@ -14,7 +14,7 @@ oagentkit 模块矩阵的 **tier 0 安全层**。与矩阵其余仓的关系：
 本仓是 **1 个 Go module、1 条版本线、零第三方依赖**：
 
 ```
-github.com/oagentkit/guardx → fence injectband logredact egress permgate invoke toolfail sandbox wire
+github.com/oagentkit/guardx → fence injectband logredact egress egressproxy permgate invoke toolfail sandbox wire
 ```
 
 主模块**零第三方依赖**：只想脱敏的下游 `import "github.com/oagentkit/guardx/logredact"`
@@ -44,10 +44,11 @@ github.com/oagentkit/guardx → fence injectband logredact egress permgate invok
 | `invoke` | ~300 | 工具调用统一契约 + 不可绕过的调用链（构造即保证）。**框架无关**：不携带 eino / policy 的类型 |
 | `logredact` | ~477 | 凭据脱敏：日志与异常面在落盘/外发前的凭据抹除 |
 | `egress` | ~475 | 出站 URL 守卫（SSRF）：**host** 逐 IP 过策略（回环/RFC1918/链路本地/CGNAT/保留段），**域名直接放行**。⚠️ **不解析 DNS、不校验 scheme** —— 见下方「已知的误用陷阱」 |
+| `egressproxy` | ~700 | **出站强制代理的实现**（HTTP 转发 + CONNECT 隧道）：`Policy`（allow/deny 主机、端口、只读档）+ **默认拒绝**（空 allow 名单 = 全拒），只监听回环、拒绝统一 403 + 原因头。`Egress()` **只声称** `EgressProxy` 档（挡不住绕开代理的原始 socket ⇒ 声称禁网就是让档位表说谎）。与 `egress` 不是同一件事：`egress` 判「这个 URL 能不能出」，本包管「流量实际从哪出去」 |
 | `fence` | ~284 | **提示注入卫生（数据侧）**：把不可信内容圈进显式数据区，并中和内容中伪造的围栏标记，防其越出数据区取指令待遇 |
 | `injectband` | ~121 | **提示注入卫生（系统侧）**：给系统带外注入打来源标记，并转义 body 内伪造的同形标签，防身份伪造 |
 | `toolfail` | ~1000 | **工具失败的分类契约**：类别 → 可重试性/退避/需人工/重发安全/面向模型的处置指引。**重发安全与重试价值是两个正交维度**——超时值得重试但服务端可能已执行，原样重发即重复施加副作用 |
-| `sandbox` | ~800 | **执行沙箱的档位语义与后端协议**：`Level`（none/process/os/machine，序即强弱）+ `Provider` + `Registry`。**选不到满足档位的后端即拒绝，绝不降级**。预算面 `Budget`（墙钟/调用数/字节/**内存**）+ 可选能力面 `Capable`（后端自报兑现哪几项；**不实现即只兑现三闸、不兑现内存**）——档位管能力面、支持面管资源兜底，两维**正交** |
+| `sandbox` | ~800 | **执行沙箱的档位语义与后端协议**：`Level`（none/process/os/machine，序即强弱）+ `Provider` + `Registry`。**选不到满足档位的后端即拒绝，绝不降级**。预算面 `Budget`（墙钟/调用数/字节/**内存**）+ 可选能力面 `Capable`（后端自报兑现哪几项；**不实现即只兑现三闸、不兑现内存**）——档位管能力面、支持面管资源兜底，两维**正交**。出站面 `EgressMode`（unrestricted/proxy/denied，序即强弱）+ 可选声明 `EgressEnforcer`——**词表必须在 tier 0 这一层**：接口一致性要求返回值类型同一，词表若在下游，上游后端「能兑现」这条路会被类型系统堵死且毫无声响 |
 | `wire` | ~1100 | **跨进程调用协议**（`github.com/oagentkit/guardx/wire`）：帧格式（4B 大端长度 + JSON 负载，不用行分隔——工具输出可能含换行）。**两条通道 × 四个角色**：启动通道（父 `Starter` ↔ 子 `Runner`，一次执行 1 个 Start + 1 个 Result）、调用通道（父 `Server` ↔ 子 `Client`，N 次工具调用）——**两条必须是两条连接**（共用一条则「这帧是 Start 还是 Response」只能靠猜，而两者 JSON 形状不同，猜错就是「字段读成了另一个意思」）。**失败分类跨进程同源**（取 `toolfail` 的分类，不退化成自由字符串）；**预算的权威在父侧**（子进程自己记账可以谎报）；**在途调用有硬上限**（超出即回「超限」，不排队等）；**取消传播靠管道关闭**（最强的取消信号）|
 
 > 「行数」口径 = 生产代码 + 测试代码总和。

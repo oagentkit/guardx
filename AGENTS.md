@@ -1,13 +1,13 @@
 # AGENTS.md — oagentkit/guardx
 
-> 安全围栏，9 个包：`fence` `injectband` `logredact` `egress` `permgate` `invoke` `toolfail` `sandbox` `wire`
+> 安全围栏，10 个包：`fence` `injectband` `logredact` `egress` `egressproxy` `permgate` `invoke` `toolfail` `sandbox` `wire`
 > module：`github.com/oagentkit/guardx` · org：[oagentkit = Open Agent Kit](https://github.com/oagentkit)
 > 矩阵分层：**tier 0（基础层）**
 
 ## 本仓包含
 
 ```
-fence/  injectband/  logredact/  egress/  permgate/  invoke/  toolfail/  sandbox/  wire/
+fence/  injectband/  logredact/  egress/  egressproxy/  permgate/  invoke/  toolfail/  sandbox/  wire/
 ```
 
 **本仓是 1 个 Go module、1 条版本线、零第三方依赖。**
@@ -94,7 +94,22 @@ github.com/oekit/pkg v0.22.1
   - **不实现 `Capable` 即只兑现基本三闸**（含**不兑现内存**）：缺省语义落在
     **保守的一侧**——漏声明得到的是「兜不住」，不是「兜得住」。方向与安全语义一致。
   - **`Provider` 不得加方法**：它已在 v0.9.0 发布，加方法是破坏性变更。能力扩展走
-    **可选接口**（`Capable`），既有实现编译期零改动。
+    **可选接口**（`Capable` / `EgressEnforcer`），既有实现编译期零改动。
+  - **出站档位词表（`EgressMode`）必须在 tier 0 的这一层**：接口
+    `EgressEnforcer{ Egress() EgressMode }` 的一致性要求**返回值类型同一**。词表若留在
+    下游，「上游提供一个能兑现的后端」这条路会被类型系统堵死，且堵得毫无声响
+    （编译期不报错，只是永远没人能满足它）。它曾经就在下游：实测一整条出口声明链
+    空转一轮，没有任何后端能声明「我能兑现」。**判定不在本包**——「没声明算不算
+    满足」是策略问题，答案必须在消费方且保守（沉默 = 不满足）。
+- **`egressproxy`** —— 本地出站代理（HTTP 转发 + CONNECT 隧道），`sandbox.EgressEnforcer`
+  的一个**实现**。硬规则：
+  - **只能声称 `EgressProxy`，不得声称 `EgressDenied`**：它挡得住经过它的流量，
+    挡不住绕开代理的原始 socket。声称禁网就是让档位表说谎。
+  - **默认拒绝**：空 allow 名单 = 全拒（不是全放），拒绝名单优先于放行名单，
+    缺省端口只 80/443。放行面的"漏了一项"必须是拦住，不能是放出去。
+  - **只监听回环**（`127.0.0.1:0`），且 `transport.Proxy = nil` 防自环。
+  - **与 `egress` 不是同一件事**：`egress` 判「这个 URL 能不能出」（SSRF 字面量围栏），
+    本包管「流量实际从哪出去」。两者可以叠用，但口径不互相替代。
 - **`wire`** —— 跨进程调用协议（`sandbox/wire`）。硬规则：
   - **协议只有一份**：后端只实现「怎么起这个进程」与「怎么执行这个程序」，
     帧格式与请求/响应语义一律用本包。协议各写一遍 ⇒ 换个后端就得换一套。
