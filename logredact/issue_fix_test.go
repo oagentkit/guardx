@@ -1,13 +1,15 @@
 package logredact
 
 import (
+	"bytes"
 	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
 )
 
-// 本文件是 guardx#50/#51/#52 三缺陷的回归钉子（2026-11 集成方实弹反哺）：
+// 本文件是集成方实弹反哺缺陷的回归钉子：guardx#50/#51/#52 一批（2026-11），
+// guardx#57/#63/#64/#69/#75/#76/#77/#81 一批（2026-11）。
 // 每组先钉「修后的正确形态」，再钉「相邻词表的存量承诺不回退」。
 
 // ── guardx#52：tokens 复数收窄——LLM usage 计量字段不再整值打码 ──────────────
@@ -185,5 +187,367 @@ func TestIsCredentialKeyPredicate(t *testing.T) {
 	// 零值 Options = 内置词表语义（等价 RedactValue/RedactJSON）
 	if got := RedactValueOpts(map[string]any{"api_key": "v"}, ValueOptions{}); got.(map[string]any)["api_key"] != maskLiteral {
 		t.Fatalf("零值 Options 应走内置词表: %v", got)
+	}
+}
+
+// ── guardx#57/#75：通用敏感形态收编——glpat-/AIza/长 hex ───────────────────
+
+// TestRedactGitLabPATPrefix 回归（guardx#57）：平台前缀名单缺 glpat-（GitLab
+// PAT，官方格式 glpat-[A-Za-z0-9_-]{20,}），v0.19.0 实测 clone URL 凭据/
+// webhook secret 原样泄漏——issue 正文复现逐字入测。
+func TestRedactGitLabPATPrefix(t *testing.T) {
+	in := "clone https://gitlab.com/user/repo.git with glpat-AbCdEf1234567890-_xyz from keychain"
+	out := Redact(in)
+	if strings.Contains(out, "glpat-AbCdEf") {
+		t.Fatalf("glpat- 泄漏: %q", out)
+	}
+	// 无凭据的 URL 部分不动（保结构是掩码承诺）
+	if !strings.Contains(out, "https://gitlab.com/user/repo.git") {
+		t.Fatalf("URL 结构应保留: %q", out)
+	}
+	// 带键形态（键在词表内）不依赖 vendor 规则
+	if out := Redact(`{"gitlab_token":"glpat-AbCdEf1234567890-_xyz"}`); strings.Contains(out, "glpat-") {
+		t.Fatalf("带键 glpat- 泄漏: %q", out)
+	}
+}
+
+// TestRedactGoogleKeyAndLongHex 回归（guardx#75 收编清单）：Google API key
+// （AIza+35 位）与长十六进制 ≥32（agent-memory 生产实证：32 位 hex API key
+// 整值泄漏）此前均需消费仓自维护补丁规则。
+func TestRedactGoogleKeyAndLongHex(t *testing.T) {
+	out := Redact("google key AIzaSyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q leaked")
+	if strings.Contains(out, "AIza") {
+		t.Fatalf("AIza key 泄漏: %q", out)
+	}
+	for _, in := range []string{
+		"blob=deadbeefdeadbeefdeadbeefdeadbeef",            // 32 位 hex API key 形态
+		"privkey=0123456789abcdef0123456789abcdef01234567", // 44 位（私钥材料形态）
+	} {
+		if out := Redact(in); strings.Contains(out, "deadbeef") || strings.Contains(strings.ToLower(out), "0123456789abcdef") {
+			t.Fatalf("长 hex 泄漏: %q -> %q", in, out)
+		}
+	}
+	// 短 hex（<32，如 IPv4 十六进制/短摘要）不误伤
+	for _, plain := range []string{"hash=deadbeef", "csum=cafe1234"} {
+		if out := Redact(plain); out != plain {
+			t.Errorf("短 hex 不应误掩: %q -> %q", plain, out)
+		}
+	}
+}
+
+// TestRedactorUnionOrderContract 回归（guardx#75 文档化）：并集顺序
+// 「先内置、后扩展」升格为契约——扩展规则见得到内置保留的结构锚点
+// （scheme/用户名），见不到内置已打码的凭据本体。
+func TestRedactorUnionOrderContract(t *testing.T) {
+	red := NewRedactor([]Rule{{
+		Name: "post-structure",
+		Re:   regexp.MustCompile(`postgres://([^:\s]+):\*\*\*\*@`),
+		Repl: "URL-MASKED",
+	}})
+	out := red("dsn=postgres://u:secretpw@h/db")
+	// 内置先打码且保结构（scheme/用户名留着），扩展只能匹配到结构残形
+	if !strings.Contains(out, "URL-MASKED") {
+		t.Fatalf("扩展规则应锚定内置保留的结构形态: %q", out)
+	}
+	if strings.Contains(out, "secretpw") {
+		t.Fatalf("凭据本体泄漏: %q", out)
+	}
+}
+
+// ── guardx#64/#75/#77：URL userinfo——任意 scheme + 空用户名文法 ───────────
+
+// TestRedactURLCredentialSchemeAndGrammar 回归（guardx#64 scheme 词表不全 /
+// guardx#77 空用户名量词缺陷 / guardx#75 任意 scheme 收编）：
+// 词表修到再全也救不了 `://:pass@` 的文法缺陷——scheme 改 RFC 3986 通用形状、
+// 用户名段改可空，两个缺陷一次修。探针电池含 #77 全部 8 个 scheme 形态。
+func TestRedactURLCredentialSchemeAndGrammar(t *testing.T) {
+	cases := []struct{ name, in, cred string }{
+		// guardx#77：scheme 全在旧表内、userinfo 文法缺陷（空用户名）
+		{"redis 空用户名", "redis://:s3cretpass@host:6379/0", "s3cretpass"},
+		{"postgres 空用户名", "postgres://:pw123@host/db", "pw123"},
+		{"postgresql 空用户名", "postgresql://:password@host/db", "password"},
+		{"mongodb 空用户名", "mongodb://:pw123@host/db", "pw123"},
+		{"mysql 空用户名", "mysql://:pw123@host/db", "pw123"},
+		{"https 空用户名", "https://:tok123@cdn.example.com/x", "tok123"},
+		{"amqp 空用户名", "amqp://:guestpw@mq:5672", "guestpw"},
+		{"rediss 空用户名", "rediss://:s3cret@cache:6380", "s3cret"},
+		// guardx#64：驱动后缀/加密后缀（旧词表整体不命中）
+		{"SQLAlchemy psycopg2", "dsn=postgresql+psycopg2://user:pw@db_host/db", ":pw@"},
+		{"SQLAlchemy pymysql", "mysql+pymysql://root:secret@127.0.0.1/db", "secret"},
+		{"TLS mqtts", "mqtts://dev:pass@broker:8883", "pass"},
+		{"sftp", "sftp://user:pass@files.example.com/backup.tar", "pass"},
+		// 存量承诺：常规形态不回退
+		{"nats 常规", "nats://ops:s3cret@10.0.0.5:4222", "s3cret"},
+		{"mongodb+srv", "mongodb+srv://user:passw0rd@cluster.example.net/", "passw0rd"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := Redact(c.in)
+			if strings.Contains(out, c.cred) {
+				t.Fatalf("泄漏: %q -> %q", c.in, out)
+			}
+		})
+	}
+	// 掩码保结构：scheme、用户名、主机留着（「认得出是哪条凭据」）
+	if out := Redact("redis://app:s3cret@10.0.0.5:6379"); out != "redis://app:****@10.0.0.5:6379" {
+		t.Fatalf("掩码应保结构: %q", out)
+	}
+	// 空用户名形态的掩码形状
+	if out := Redact("redis://:s3cret@host"); out != "redis://:****@host" {
+		t.Fatalf("空用户名掩码形状: %q", out)
+	}
+	// 纯用户名（无密码）不掩：ssh://git@github.com 是 git clone 日志最高频
+	// URL，用户名不是凭据（#77 建议的取舍：token-作-用户名由 vendor 前缀兜）
+	for _, plain := range []string{
+		"git clone ssh://git@github.com/oagentkit/guardx.git",
+		"postgres://postgres@localhost/db",
+		"https://example.com/docs?a=b",
+	} {
+		if out := Redact(plain); out != plain {
+			t.Errorf("纯用户名/无 userinfo URL 不应误掩: %q -> %q", plain, out)
+		}
+	}
+}
+
+// ── guardx#69：hintMatch 组捕获失败回退全量打码 ─────────────────────────────
+
+// TestHintMatchFallbackFullMask 回归（guardx#69）：Group 越界/可选组未参与
+// 匹配时回退整段 MaskHint——保留的尾 4 字符落在凭据上（Rule.Group 注释
+// 自述的「线索=泄露」陷阱）。回退分支一律全量打码：宁可丢线索，不留尾巴。
+// 键面用 app=（不在凭证词表内），隔离内置 kv 规则的干扰。
+func TestHintMatchFallbackFullMask(t *testing.T) {
+	// 组越界（Group=2 但正则只有 1 个捕获组）
+	r := Rule{Name: "oob", Re: regexp.MustCompile(`app=(\w+)`), Style: MaskStyleHint, Keep: 4, Group: 2}
+	if got := RedactWith("app=SUPERSECRETVALUE", []Rule{r}); got != "****" {
+		t.Fatalf("越界组应整段全量打码，得到 %q", got)
+	}
+	// 可选组未参与匹配（x 前缀分支未走）
+	r2 := Rule{Name: "opt", Re: regexp.MustCompile(`app=(?:x(\w+)|\w+)`), Style: MaskStyleHint, Keep: 4, Group: 1}
+	if got := RedactWith("app=SUPERSECRETVALUE", []Rule{r2}); got != "****" {
+		t.Fatalf("未参与组应整段全量打码，得到 %q", got)
+	}
+	// 正常 Group 仍保线索（不因回退收紧而丢档）
+	r3 := Rule{Name: "ok", Re: regexp.MustCompile(`app=(\w+)`), Style: MaskStyleHint, Keep: 4, Group: 1}
+	if got := RedactWith("app=SUPERSECRETVALUE1234", []Rule{r3}); got != "app=SUPE****1234" {
+		t.Fatalf("捕获组掩码不应回退，得到 %q", got)
+	}
+	// Group=0（整段 hint）是文档化的另一档，不走回退分支
+	r4 := Rule{Name: "whole", Re: regexp.MustCompile(`app=\w+`), Style: MaskStyleHint, Keep: 4}
+	if got := RedactWith("app=SUPERSECRETVALUE1234", []Rule{r4}); got != "app=****1234" {
+		t.Fatalf("整段 hint 档不应变，得到 %q", got)
+	}
+}
+
+// ── guardx#63/#76：RedactValue 类型化容器 + map[string]string 盲区 ─────────
+
+// TestRedactValueTypedMaps 回归（guardx#63/#76）：类型开关只认
+// map[string]any/[]any，map[string]string（agent-harness pii 包注释在案的
+// 已知结构盲区）等类型化容器 default 原样返回——静默漏脱。反射下探后：
+// 键过键名判定、字符串值过文本规则、输出为副本。
+func TestRedactValueTypedMaps(t *testing.T) {
+	in := map[string]string{
+		"password": "hunter2",
+		"dsn":      "postgres://u:pw@h/db",
+		"note":     "safe",
+	}
+	out, ok := RedactValue(in).(map[string]string)
+	if !ok {
+		t.Fatalf("map[string]string 应还回 map[string]string: %T", RedactValue(in))
+	}
+	if out["password"] != "****" {
+		t.Fatalf("凭证词键应整值打码: %q", out["password"])
+	}
+	if strings.Contains(out["dsn"], "pw@") {
+		t.Fatalf("字符串值应过文本规则: %q", out["dsn"])
+	}
+	if out["note"] != "safe" {
+		t.Fatalf("无凭据值不应改动: %q", out["note"])
+	}
+	// 副本语义：入参不被污染
+	if in["password"] != "hunter2" || in["dsn"] != "postgres://u:pw@h/db" {
+		t.Fatalf("入参被污染: %v", in)
+	}
+
+	// 命名 string 元素类型：掩码经 Convert 还型（type Password string 字段
+	// 掩码后仍是该类型），文本规则同样生效
+	type secret string
+	tin := map[string]secret{"password": "hunter2", "dsn": "postgres://u:pw@h/db"}
+	tout, ok := RedactValue(tin).(map[string]secret)
+	if !ok {
+		t.Fatalf("map[string]secret 应还回同类型: %T", RedactValue(tin))
+	}
+	if tout["password"] != secret("****") {
+		t.Fatalf("命名 string 键命中应整值打码还型: %q", tout["password"])
+	}
+	if strings.Contains(string(tout["dsn"]), "pw@") {
+		t.Fatalf("命名 string 值应过文本规则: %q", tout["dsn"])
+	}
+
+	// 具体数字元素类型承载不了掩码字面量：只下探不整值掩（数字本体不是
+	// 凭据文本，类型系统的硬边界——文档明示的行为）
+	if got := RedactValue(map[string]int{"password": 42}).(map[string]int)["password"]; got != 42 {
+		t.Fatalf("数字元素不应被改写: %v", got)
+	}
+
+	// 非字符串键只下探值
+	iin := map[int]string{1: "token=abc"}
+	if got := RedactValue(iin).(map[int]string)[1]; strings.Contains(got, "abc") {
+		t.Fatalf("非字符串键的值应下探: %q", got)
+	}
+}
+
+// TestRedactValueTypedSlicesAndStructs 回归（guardx#63）：[]string、
+// []map[string]any、struct 导出字段（字段名过键名判定）、指针一律下探；
+// 未导出字段反射不可读（原样，边界文档明示）。
+func TestRedactValueTypedSlicesAndStructs(t *testing.T) {
+	// []string
+	sout := RedactValue([]string{"token=abc", "safe"}).([]string)
+	if strings.Contains(sout[0], "abc") || sout[1] != "safe" {
+		t.Fatalf("[]string 下探不符: %v", sout)
+	}
+	// []map[string]any（typed 容器嵌 any 容器）
+	nin := []map[string]any{{"api_key": "sk-xyz"}, {"note": "ok"}}
+	nout := RedactValue(nin).([]map[string]any)
+	if nout[0]["api_key"] != "****" || nout[1]["note"] != "ok" {
+		t.Fatalf("[]map[string]any 下探不符: %v", nout)
+	}
+	// struct：导出字段名过键名判定、字符串字段过文本规则、标量不动
+	type conn struct {
+		DSN        string
+		Password   string
+		AuthToken  string
+		RetryCount int
+	}
+	got, ok := RedactValue(conn{
+		DSN:        "redis://:pw@h/db",
+		Password:   "hunter2",
+		AuthToken:  "opaque-token-123",
+		RetryCount: 3,
+	}).(conn)
+	if !ok {
+		t.Fatalf("struct 应还回同类型: %T", RedactValue(conn{}))
+	}
+	if strings.Contains(got.DSN, ":pw@") {
+		t.Fatalf("struct 字符串字段应过文本规则: %q", got.DSN)
+	}
+	if got.Password != "****" || got.AuthToken != "****" {
+		t.Fatalf("凭证词字段名应整值打码: %q %q", got.Password, got.AuthToken)
+	}
+	if got.RetryCount != 3 {
+		t.Fatalf("标量字段不应改动: %v", got.RetryCount)
+	}
+	// 指针下探还回指针
+	pgot, ok := RedactValue(&conn{Password: "hunter2"}).(*conn)
+	if !ok || pgot.Password != "****" {
+		t.Fatalf("指针应下探还回指针: %v", pgot)
+	}
+	// 未导出字段反射不可读（原样）——此类类型请传导出形态
+	type opaque struct{ secret string }
+	ogot := RedactValue(opaque{secret: "hunter2"}).(opaque)
+	if ogot.secret != "hunter2" {
+		t.Fatalf("未导出字段应原样（反射边界）: %q", ogot.secret)
+	}
+	// json.Number 特赦：数字字面量保形（JSON 路径大整数精度承诺）
+	big := json.Number("123456789012345678901234567890")
+	if got := RedactValue(map[string]any{"big": big}).(map[string]any)["big"]; got != big {
+		t.Fatalf("json.Number 应保形: %v", got)
+	}
+	// []byte 是二进制不是文本，原样
+	raw := []byte{0xde, 0xad, 0xbe, 0xef}
+	if got := RedactValue(raw).([]byte); !bytes.Equal(got, raw) {
+		t.Fatalf("[]byte 应原样: %v", got)
+	}
+}
+
+// TestRedactValueCycleBounded 类型化值的自引用环有深度上限（无上限会挂死
+// 脱敏链路）——JSON 解码值不可能成环，本测只钉「不栈溢出、能返回」。
+func TestRedactValueCycleBounded(t *testing.T) {
+	cyclic := map[string]any{}
+	cyclic["self"] = cyclic
+	out := RedactValue(cyclic) // 有上限 ⇒ 必然返回
+	if out == nil {
+		t.Fatal("自引用环应受深度上限保护并返回")
+	}
+}
+
+// TestRedactValueExtraRulesValuePatterns 回归（guardx#76 值模式检测缝）：
+// 手机号/身份证这类值本身即敏感、无键名可依的形态，经 ExtraRules 注入
+// 结构化路径的字符串叶子——agent-harness 整包自研 pii 的递归面由此收编，
+// 只留值模式正则（地区口径刻意不进内置表）。
+func TestRedactValueExtraRulesValuePatterns(t *testing.T) {
+	opts := ValueOptions{ExtraRules: []Rule{
+		{Name: "cn-mobile", Re: regexp.MustCompile(`\b1[3-9]\d{9}\b`), Repl: "****"},
+		{Name: "cn-idcard", Re: regexp.MustCompile(`\b\d{17}[0-9Xx]\b`), Repl: "****"},
+	}}
+	in := map[string]any{
+		"contact":  "手机 13812345678 失联",
+		"ids":      []any{"身份证 11010119900307867X", "ok"},
+		"typed":    map[string]string{"caller": "13812345678"},
+		"password": "hunter2", // 内置键表承诺不因 ExtraRules 松动
+		"keep":     "普通文本 12345",
+	}
+	out := RedactValueOpts(in, opts).(map[string]any)
+	s, _ := out["contact"].(string)
+	if strings.Contains(s, "13812345678") {
+		t.Fatalf("手机号值模式漏掩: %q", s)
+	}
+	ids := out["ids"].([]any)
+	if strings.Contains(ids[0].(string), "11010119900307867X") {
+		t.Fatalf("身份证值模式漏掩: %q", ids[0])
+	}
+	if ids[1] != "ok" {
+		t.Fatalf("普通值不应改动: %v", ids[1])
+	}
+	typed := out["typed"].(map[string]string)
+	if strings.Contains(typed["caller"], "13812345678") {
+		t.Fatalf("类型化容器字符串叶子应过 ExtraRules: %q", typed["caller"])
+	}
+	if out["password"] != "****" {
+		t.Fatalf("内置键表承诺不应松动: %v", out["password"])
+	}
+	if out["keep"] != "普通文本 12345" {
+		t.Fatalf("无命中值不应改动: %v", out["keep"])
+	}
+	// 零值 Options = 不带扩展（手机号值原样——值模式是调用方口径）
+	plain := RedactValueOpts(map[string]any{"contact": "13812345678"}, ValueOptions{})
+	if plain.(map[string]any)["contact"] != "13812345678" {
+		t.Fatalf("零值 Options 不应套用扩展: %v", plain)
+	}
+}
+
+// ── guardx#81：RFC 7235 方案词锚定——Basic 裸形态 ───────────────────────────
+
+// TestRedactAuthSchemeWords 回归（guardx#81）：方案锚定只有 Bearer——
+// Basic <base64>（一解码即明文 user:pass）在非词表键名（auth_header/
+// proxy_auth）下整段泄漏。方案词表推广后存量 Bearer 形态不回退；Token
+// 刻意不入表（LLM usage 散文计量行，#52 契约）。
+func TestRedactAuthSchemeWords(t *testing.T) {
+	cases := []struct{ name, in, cred string }{
+		{"issue 复现 auth_header", "auth_header=Basic dXNlcjpwYXNzMTIz", "dXNlcjpwYXNzMTIz"},
+		{"非词表键 proxy_auth", "proxy_auth=Negotiate YIIphzGCSqGSIb3Eg", "YIIphzGCSqGSIb3Eg"},
+		{"散文 curl 头", "curl -H 'X-Auth: Basic c2VjcmV0dXNlcjpwYXNz'", "c2VjcmV0dXNlcjpwYXNz"},
+		{"Digest 摘要", "auth_header=Digest username=alice response=deadbeefdeadbeefdeadbeefdeadbeef", "deadbeefdeadbeefdeadbeefdeadbeef"},
+		{"存量 Bearer", "auth=Bearer gf7t2xK9randomOpaqueToken0a1b2c", "gf7t2xK9randomOpaqueToken0a1b2c"},
+		{"存量 Authorization 头", "Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if out := Redact(c.in); strings.Contains(out, c.cred) {
+				t.Fatalf("泄漏: %q -> %q", c.in, out)
+			}
+		})
+	}
+	// 存量收敛形态不回退：kv 吞掉方案词前缀，输出单段掩码
+	if out := Redact("auth=Bearer tok.en.sig"); out != "auth=****" {
+		t.Fatalf("auth=Bearer 应收敛为单段掩码: %q", out)
+	}
+	// 方案词刻意不含 Token：LLM usage 散文计量行不误掩（#52 契约）
+	for _, in := range []string{
+		"request used prompt tokens 500, completion tokens 120",
+		"total tokens 46 cached tokens 3",
+	} {
+		if out := Redact(in); out != in {
+			t.Errorf("usage 计量散文被误掩: %q -> %q", in, out)
+		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"regexp"
 )
 
@@ -57,6 +58,14 @@ type ValueOptions struct {
 	// （oagentkit/guardx#51：集成方喂自己的 isCredentialKey，替掉为兜自家
 	// 键形态而维护的整套绕行脱敏器。）
 	IsCredentialKey func(key string) bool
+	// ExtraRules 追加到字符串叶子文本规则的扩展表（guardx#76 的**值模式**
+	// 检测缝）：结构化路径的每个字符串叶子按「先内置、后扩展」过
+	// RedactWith——手机号/身份证这类**值本身即敏感、无键名可依**的形态由
+	// 调用方注入正则规则，不必再自研结构递归器（agent-harness 整包 pii 的
+	// 递归 ApplyValue 由此收编，只留值模式正则）。刻意不进内置表：值模式
+	// 是地区/产品口径（大陆手机号正则会误掩 11 位订单号/毫秒时间戳），
+	// 内置表守的是通用凭证语义。
+	ExtraRules []Rule
 }
 
 // maskLiteral 凭证词键的整值打码体。
@@ -78,7 +87,8 @@ func RedactJSON(data []byte) []byte {
 	return RedactJSONOpts(data, ValueOptions{})
 }
 
-// RedactJSONOpts 同 RedactJSON，接受 ValueOptions（自定义键名判定等）。
+// RedactJSONOpts 同 RedactJSON，接受 ValueOptions（自定义键名判定、值模式
+// 扩展规则等；非法 JSON 回落文本规则时 ExtraRules 同样生效）。
 func RedactJSONOpts(data []byte, opts ValueOptions) []byte {
 	if json.Valid(data) {
 		dec := json.NewDecoder(bytes.NewReader(data))
@@ -90,19 +100,46 @@ func RedactJSONOpts(data []byte, opts ValueOptions) []byte {
 			}
 		}
 	}
-	return []byte(Redact(string(data)))
+	return []byte(RedactWith(string(data), opts.ExtraRules))
 }
 
 // redactWalk 键感知递归打码：凭证词键的整值打码（无论原值是字符串、数字、
 // 对象还是数组——键表内的键，值必被打码，不留「对象形态绕过」的缝）；其余
-// 字符串值过文本规则；容器下探；标量原样。payload 非 nil 时载荷字段先于
-// 凭证词判定（载荷裁剪语义见 payload.go）。opts.IsCredentialKey 非 nil 时
-// 作为内置词表之上的追加键名判定。
+// 字符串值过文本规则（含 opts.ExtraRules）；容器下探；标量原样。payload
+// 非 nil 时载荷字段先于凭证词判定（载荷裁剪语义见 payload.go）。
+// opts.IsCredentialKey 非 nil 时作为内置词表之上的追加键名判定。
+// 类型开关外的类型化容器（guardx#63/#76）经 redactReflect 反射下探。
 func redactWalk(v any, payload map[string]struct{}, opts ValueOptions) any {
+	return redactWalkDepth(v, payload, opts, 0)
+}
+
+// maxWalkDepth 结构递归深度上限：防类型化 Go 值的自引用环（JSON 解码值不可
+// 能成环，类型化容器可以——无上限会栈溢出挂死脱敏链路）。超限的容器原样
+// 返回；字符串叶子不递归、不受上限影响。64 层已远超真实载荷嵌套深度。
+const maxWalkDepth = 64
+
+var (
+	stringType       = reflect.TypeOf("")
+	jsonNumberType   = reflect.TypeOf(json.Number(""))
+	mapStringAnyType = reflect.TypeOf(map[string]any(nil))
+	sliceAnyType     = reflect.TypeOf([]any(nil))
+)
+
+// isCredentialKeyName 键名判定：内置词表 + 调用方回调叠加（回调只加不减，
+// guardx#51 契约：返回 false 不豁免内置命中）。
+func isCredentialKeyName(key string, opts ValueOptions) bool {
+	return jsonCredentialKeyRe.MatchString(key) ||
+		(opts.IsCredentialKey != nil && opts.IsCredentialKey(key))
+}
+
+func redactWalkDepth(v any, payload map[string]struct{}, opts ValueOptions, depth int) any {
 	switch t := v.(type) {
 	case string:
-		return Redact(t)
+		return RedactWith(t, opts.ExtraRules)
 	case map[string]any:
+		if depth >= maxWalkDepth {
+			return v
+		}
 		out := make(map[string]any, len(t))
 		for k, vv := range t {
 			if _, isPayload := payload[k]; isPayload {
@@ -115,21 +152,240 @@ func redactWalk(v any, payload map[string]struct{}, opts ValueOptions) any {
 					continue
 				}
 			}
-			if jsonCredentialKeyRe.MatchString(k) ||
-				(opts.IsCredentialKey != nil && opts.IsCredentialKey(k)) {
+			if isCredentialKeyName(k, opts) {
 				out[k] = maskLiteral
 				continue
 			}
-			out[k] = redactWalk(vv, payload, opts)
+			out[k] = redactWalkDepth(vv, payload, opts, depth+1)
 		}
 		return out
 	case []any:
+		if depth >= maxWalkDepth {
+			return v
+		}
 		out := make([]any, len(t))
 		for i, vv := range t {
-			out[i] = redactWalk(vv, payload, opts)
+			out[i] = redactWalkDepth(vv, payload, opts, depth+1)
 		}
 		return out
 	default:
+		return redactReflect(v, payload, opts, depth)
+	}
+}
+
+// redactReflect 类型化容器的反射下探（guardx#63/#76）：redactWalk 的类型
+// 开关只认 any 解码形态（map[string]any/[]any），map[string]string、
+// []string、[]map[string]any、struct 导出字段等 Go 侧类型化容器此前一律
+// default 原样返回——脱敏器最危险的失效形态：**静默漏脱**（事件载荷以类型化
+// 容器传入时连接串/Bearer 头原文落库）。本函数按 map/slice/array/struct/
+// 指针/接口递归，语义与 any 形态同源：字符串键/结构体字段名过键名与载荷
+// 判定、字符串叶子过文本规则（含 ExtraRules）、容器逐元素下探。
+//
+// 刻意的边界：
+//   - json.Number 特赦——它是命名 string，但是数字字面量不是文本（JSON 路径
+//     大整数保形依赖它原样透传）；其余命名 string 类型（type Password string）
+//     仍是文本。
+//   - []byte 是二进制载荷不是文本，逐字节下探只有拷贝开销没有检测面。
+//   - 未导出字段反射不可读（walkReflectStruct 原样保留）。
+//   - 输出为副本（新容器/新结构体），不污染入参。
+func redactReflect(v any, payload map[string]struct{}, opts ValueOptions, depth int) any {
+	rv := reflect.ValueOf(v)
+	if !rv.IsValid() {
 		return v
 	}
+	// any 形态快路径：交回类型开关，键判定/载荷/下探同一份实现（嵌在类型化
+	// 容器里的 any 容器与顶层 any 容器行为一致）
+	switch rv.Type() {
+	case mapStringAnyType, sliceAnyType:
+		return redactWalkDepth(rv.Interface(), payload, opts, depth+1)
+	}
+	switch rv.Kind() {
+	case reflect.String:
+		if rv.Type() == jsonNumberType {
+			return v
+		}
+		return RedactWith(rv.String(), opts.ExtraRules)
+	case reflect.Map:
+		if rv.IsNil() {
+			return v
+		}
+		return walkReflectMap(rv, payload, opts, depth)
+	case reflect.Slice, reflect.Array:
+		if rv.Kind() == reflect.Slice && rv.IsNil() {
+			return v
+		}
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			return v
+		}
+		return walkReflectSeq(rv, payload, opts, depth)
+	case reflect.Struct:
+		return walkReflectStruct(rv, payload, opts, depth)
+	case reflect.Ptr:
+		if rv.IsNil() {
+			return v
+		}
+		walked := redactReflect(rv.Elem().Interface(), payload, opts, depth+1)
+		p := reflect.New(rv.Type().Elem())
+		if wv := reflect.ValueOf(walked); wv.IsValid() && wv.Type().AssignableTo(p.Elem().Type()) {
+			p.Elem().Set(wv)
+			return p.Interface()
+		}
+		return v
+	case reflect.Interface:
+		if rv.IsNil() {
+			return v
+		}
+		return redactReflect(rv.Elem().Interface(), payload, opts, depth+1)
+	default:
+		return v
+	}
+}
+
+// stringValueOf 取「动态类型恰为 string」的值（命名 string 类型不算——掩码
+// 字面量/裁剪标记塞回具体命名类型会类型错配）：载荷裁剪只作用于字符串形态。
+func stringValueOf(val reflect.Value) (string, bool) {
+	switch {
+	case val.Type() == stringType:
+		return val.String(), true
+	case val.Kind() == reflect.Interface && !val.IsNil() && val.Elem().Type() == stringType:
+		return val.Elem().String(), true
+	}
+	return "", false
+}
+
+// maskValueFor 目标元素/字段类型的整值掩码值：string（含命名 string，经
+// Convert 还型）与接口类型可承载 "****"；具体数字/复合类型承载不了（塞
+// 字符串字面量会类型错配），返回 false 由调用方转下探——数字/布尔本体不是
+// 凭据文本，any 形态里它们被掩是「能掩就掩」，类型化形态里掩不了是类型
+// 系统的硬边界，不是承诺松动。
+func maskValueFor(t reflect.Type) (reflect.Value, bool) {
+	switch t.Kind() {
+	case reflect.String:
+		if t == stringType {
+			return reflect.ValueOf(maskLiteral), true
+		}
+		return reflect.ValueOf(maskLiteral).Convert(t), true
+	case reflect.Interface:
+		return reflect.ValueOf(maskLiteral), true
+	}
+	return reflect.Value{}, false
+}
+
+// walkReflectMap 类型化 map 的下探：字符串键过载荷/键名判定（与 any 形态
+// 同一份语义、同一份词表）；非字符串键（map[int]…）只下探值。
+func walkReflectMap(rv reflect.Value, payload map[string]struct{}, opts ValueOptions, depth int) any {
+	if depth >= maxWalkDepth {
+		return rv.Interface()
+	}
+	et := rv.Type().Elem()
+	out := reflect.MakeMapWithSize(rv.Type(), rv.Len())
+	it := rv.MapRange()
+	for it.Next() {
+		k, val := it.Key(), it.Value()
+		if k.Kind() == reflect.String {
+			ks := k.String()
+			if _, isPayload := payload[ks]; isPayload {
+				if s, isStr := stringValueOf(val); isStr {
+					if payloadMarkerRe.MatchString(s) {
+						out.SetMapIndex(k, reflect.ValueOf(s)) // 已是标记 ⇒ 幂等保留
+					} else {
+						out.SetMapIndex(k, reflect.ValueOf(fmt.Sprintf(payloadMarkerFormat, len(s))))
+					}
+					continue
+				}
+				// 非字符串形态的载荷值：下探（与 any 形态同语义）
+			}
+			if isCredentialKeyName(ks, opts) {
+				if mv, ok := maskValueFor(et); ok {
+					out.SetMapIndex(k, mv)
+					continue
+				}
+			}
+		}
+		out.SetMapIndex(k, walkAssignable(val, et, payload, opts, depth+1))
+	}
+	return out.Interface()
+}
+
+// walkReflectSeq 类型化 slice/array 的下探：元素逐个走（字符串元素过文本
+// 规则，元素容器继续反射），类型与长度保形。
+func walkReflectSeq(rv reflect.Value, payload map[string]struct{}, opts ValueOptions, depth int) any {
+	if depth >= maxWalkDepth {
+		return rv.Interface()
+	}
+	et := rv.Type().Elem()
+	var out reflect.Value
+	if rv.Kind() == reflect.Slice {
+		out = reflect.MakeSlice(rv.Type(), rv.Len(), rv.Len())
+	} else {
+		out = reflect.New(rv.Type()).Elem()
+		out.Set(rv)
+	}
+	for i := 0; i < rv.Len(); i++ {
+		out.Index(i).Set(walkAssignable(rv.Index(i), et, payload, opts, depth+1))
+	}
+	return out.Interface()
+}
+
+// walkReflectStruct struct 的下探：**字段名**过载荷/键名判定（Password/
+// AuthToken 命中即整值掩码）；先整体拷贝再覆写下探结果——未导出字段
+// （反射不可读）与无需处理的原样保留。
+func walkReflectStruct(rv reflect.Value, payload map[string]struct{}, opts ValueOptions, depth int) any {
+	if depth >= maxWalkDepth {
+		return rv.Interface()
+	}
+	t := rv.Type()
+	out := reflect.New(t).Elem()
+	out.Set(rv)
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		fv := rv.Field(i)
+		if _, isPayload := payload[f.Name]; isPayload {
+			if s, isStr := stringValueOf(fv); isStr {
+				if payloadMarkerRe.MatchString(s) {
+					out.Field(i).Set(reflect.ValueOf(s)) // 已是标记 ⇒ 幂等保留
+				} else {
+					out.Field(i).Set(reflect.ValueOf(fmt.Sprintf(payloadMarkerFormat, len(s))))
+				}
+				continue
+			}
+			// 非字符串形态的载荷值：下探（与 any 形态同语义）
+		}
+		if isCredentialKeyName(f.Name, opts) {
+			if mv, ok := maskValueFor(f.Type); ok {
+				out.Field(i).Set(mv)
+				continue
+			}
+		}
+		out.Field(i).Set(walkAssignable(fv, f.Type, payload, opts, depth+1))
+	}
+	return out.Interface()
+}
+
+// walkAssignable 下探后回填到目标元素/字段类型：叶子文本规则返回裸 string，
+// 命名 string 目标经 Convert 还型（type Password string 的字段掩码后仍是
+// Password）；nil 接口叶子取目标零值；理论不可达的类型失配兜底取原值
+// （宁可不改，不让脱敏链路 panic）。
+func walkAssignable(val reflect.Value, dst reflect.Type, payload map[string]struct{}, opts ValueOptions, depth int) reflect.Value {
+	var walked any
+	switch {
+	case val.Kind() == reflect.Interface && !val.IsNil():
+		walked = redactReflect(val.Elem().Interface(), payload, opts, depth)
+	case val.Kind() != reflect.Interface:
+		walked = redactReflect(val.Interface(), payload, opts, depth)
+	}
+	if walked == nil { // nil 接口叶子（接口形态的空值）
+		return reflect.Zero(dst)
+	}
+	wv := reflect.ValueOf(walked)
+	if wv.Type() == stringType && dst.Kind() == reflect.String && dst != stringType {
+		wv = wv.Convert(dst)
+	}
+	if wv.Type().AssignableTo(dst) {
+		return wv
+	}
+	return val
 }
