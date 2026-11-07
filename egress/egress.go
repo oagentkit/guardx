@@ -70,10 +70,7 @@ func Check(rawURL string) error {
 	if err != nil {
 		return fmt.Errorf("egress: URL 解析失败: %w", err)
 	}
-	if err := checkScheme(u); err != nil {
-		return err
-	}
-	return CheckHost(u.Hostname())
+	return checkURL(u)
 }
 
 // CheckWith 校验完整 URL 的 host（放行面语义见 Policy；解析失败 fail-closed）。
@@ -85,6 +82,22 @@ func CheckWith(rawURL string, p Policy) error {
 	if err != nil {
 		return fmt.Errorf("egress: URL 解析失败: %w", err)
 	}
+	return checkURLWith(u, p)
+}
+
+// checkURL 已解析 URL 的字面量判定（scheme 白名单 + host 策略）。
+//
+// 与 CheckRedirect 共用**同一份**判定：写面与重定向面判的是同一件事，各写一遍就会
+// 出「首跳拒、重定向放」或反过来的不对称。
+func checkURL(u *url.URL) error {
+	if err := checkScheme(u); err != nil {
+		return err
+	}
+	return CheckHost(u.Hostname())
+}
+
+// checkURLWith 同 checkURL，放行面取 p。
+func checkURLWith(u *url.URL, p Policy) error {
 	if err := checkScheme(u); err != nil {
 		return err
 	}

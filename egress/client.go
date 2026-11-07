@@ -72,6 +72,45 @@ func (p Policy) NewClient(base *http.Client) (*http.Client, error) {
 	return &out, nil
 }
 
+// maxRedirects 重定向跳数上限（与 net/http 的默认口径一致：`len(via) >= 10` 即拒，
+// via 装的是**已经发出**的请求，故最多跟随 10 跳）。
+const maxRedirects = 10
+
+// CheckRedirect 逐跳判定，直接赋给 http.Client.CheckRedirect。
+//
+// # 它补的是哪一半
+//
+// 写面（Check / CheckWith）只判**首跳 URL**；NewClient 的拨号层守卫兜住了重定向
+// 目标，但它有两个结构性盲点：
+//
+//   - **调用方自带的传输器不是 *http.Transport**（otelhttp / 重试 / 认证包装都是
+//     RoundTripper 包装）⇒ NewClient 直接返回错误，调用方在本包内没有任何逐跳路径；
+//   - **走代理**（Transport.Proxy）时拨号地址是**代理地址** ⇒ 拨号层看不到目标。
+//     这正是 NewClient 注释里写明的边界（「走了代理时目标侧判定仍要靠写面」），
+//     而重定向时**写面只判了首跳**——于是这一段是裸的。
+//
+// # 跳数上限为什么必须在这里承担
+//
+// `http.Client` 一旦设置了 CheckRedirect，**就不再套用自己的默认 10 跳上限**。所以
+// 一个「只判 URL 不判跳数」的 CheckRedirect 等于顺手把默认的跳数保护关掉——
+// 上限必须在同一个函数里。这里固定取 net/http 的默认值 10；要换上限就自己包一层
+// （先判 `len(via)` 再调本函数），本包**不另开一个上限旋钮**：两个上限并存时谁
+// 生效取决于调用点，口径必然漂。
+//
+// # 用法
+//
+//	c := p.MustClient(base)                 // 拨号层守卫（非代理场景已足够）
+//	c.CheckRedirect = p.CheckRedirect       // 代理场景 / 自定义传输器的逐跳兜底
+//
+// 两者同时挂是**纵深**，不是二选一：一次重定向会先过 CheckRedirect，真正拨号时再过
+// 拨号层守卫——两层判的是同一份放行面，故不会出现「一层放行、一层拒」的假红。
+func (p Policy) CheckRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return errors.Errorf("egress: 重定向超过 %d 跳（停在 %s）", maxRedirects, req.URL.Redacted())
+	}
+	return checkURLWith(req.URL, p)
+}
+
 // MustClient 同 NewClient，出错即 panic（适合包级初始化等不容错的场景）。
 func (p Policy) MustClient(base *http.Client) *http.Client {
 	c, err := p.NewClient(base)
