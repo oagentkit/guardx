@@ -115,18 +115,18 @@ func TestRuleContentMatching(t *testing.T) {
 }
 
 func TestSubjectsExtraction(t *testing.T) {
-	if got := subjects("raw command", "x"); len(got) != 1 || len(got[0]) != 1 || got[0][0] != "raw command" {
+	if got := subjects("raw command", nil); len(got) != 1 || len(got[0]) != 1 || got[0][0] != "raw command" {
 		t.Fatalf("字符串输入: %v", got)
 	}
 	m := map[string]any{"command": "ls", "file_path": "a"}
-	if got := subjects(m, "bash"); got[0][0] != "ls" {
+	if got := subjects(m, nil); got[0][0] != "ls" {
 		t.Fatalf("command 优先: %v", got)
 	}
 	m2 := map[string]any{"file_path": "/tmp/x"}
-	if got := subjects(m2, "read"); got[0][0] != "/tmp/x" {
+	if got := subjects(m2, nil); got[0][0] != "/tmp/x" {
 		t.Fatalf("file_path: %v", got)
 	}
-	if got := subjects(42, "x"); got != nil {
+	if got := subjects(42, nil); got != nil {
 		t.Fatalf("未知形态: %v", got)
 	}
 }
@@ -407,31 +407,31 @@ type Detail struct {
 
 func TestTypedInputSubjects(t *testing.T) {
 	// map[string]string：与 map[string]any 同构
-	got := subjects(map[string]string{"command": "ls", "file_path": "/tmp/x"}, "bash")
+	got := subjects(map[string]string{"command": "ls", "file_path": "/tmp/x"}, nil)
 	if len(got) != 2 || got[0][0] != "ls" || got[1][0] != "/tmp/x" {
 		t.Fatalf("map[string]string 提取: %v", got)
 	}
 	// struct：字段名 + json tag + 匿名嵌入
 	in := typedArgs{Command: "git status", URL: "https://a.com", Detail: Detail{FilePath: "/etc/passwd"}}
-	got = subjects(in, "x")
+	got = subjects(in, nil)
 	if len(got) != 3 || got[0][0] != "git status" || got[1][0] != "https://a.com" || got[2][0] != "/etc/passwd" {
 		t.Fatalf("struct 提取: %v", got)
 	}
 	// 指针形态
-	got = subjects(&in, "x")
+	got = subjects(&in, nil)
 	if len(got) != 3 {
 		t.Fatalf("指针 struct 提取: %v", got)
 	}
 	// 其它 map 形态（值非 string 的不参与；string 值照常提取）
-	if got := subjects(map[string]int{"command": 3}, "x"); got != nil {
+	if got := subjects(map[string]int{"command": 3}, nil); got != nil {
 		t.Fatalf("非 string 值不参与: %v", got)
 	}
-	got = subjects(map[string]any{"command": 42}, "x")
+	got = subjects(map[string]any{"command": 42}, nil)
 	if got != nil {
 		t.Fatalf("map[string]any 非 string 值不参与: %v", got)
 	}
 	// nil 与未知形态
-	if got := subjects(nil, "x"); got != nil {
+	if got := subjects(nil, nil); got != nil {
 		t.Fatalf("nil: %v", got)
 	}
 }
