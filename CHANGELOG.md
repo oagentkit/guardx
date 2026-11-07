@@ -2,6 +2,43 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.21.0] — 2026-11-07
+
+### 新增(sandbox,egressproxy)：出站档位词表落到 tier 0 + 本地强制代理（兑现面）
+
+此前「声明了受限出口」在一整条链上没有兑现者：声明面（档位/自检/env 生成/
+Verify）全齐，但**没有任何后端能声明「我能兑现」**。根因不是疏忽，是类型系统：
+能力声明接口要返回档位词表里的类型，词表留在下游 ⇒ 上游任何后端实现它都得
+import 下游 ⇒ 成环。于是一条接口在结构上只可能由宿主实现，而编译期一声不响。
+- sandbox：EgressMode（unrestricted/proxy/denied，序即强弱）+ 可选契约
+  EgressEnforcer{ Egress() EgressMode }。与 Level 同层同理：跨模块共享的**词表**
+  必须低于所有实现方。判定不在本包——「没声明算不算满足」是策略问题，答案必须
+  在消费方且保守（沉默 = 不满足）。Provider 一个方法都不加。
+- egressproxy：本地出站**强制**代理。Policy（allow/deny 主机、端口、只读档
+  Limited）+ **默认拒绝**（空 allow 名单 = 全拒、拒绝名单优先、缺省端口 80/443、
+  *.suffix 只匹配子域）+ CONNECT 隧道 + 明文转发（逐跳头剥离、transport.Proxy
+  = nil 防自环）+ 拒绝统一 403 带 X-Egress-Blocked 原因头。只监听回环。
+  Egress() **只声称 EgressProxy**：它挡得住经过它的流量，挡不住绕开代理的原始
+  socket——声称禁网就是让档位表说谎。
+与 egress（SSRF 字面量围栏）不是同一件事：egress 判「这个 URL 能不能出」，
+egressproxy 管「流量实际从哪出去」。两者可叠用，口径不互相替代。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.37.1
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.36.0` | `v0.37.1` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+
 ## [v0.20.0] — 2026-11-07
 
 ### 修复(egress/fence/injectband/invoke)：域名解析围栏与 scheme 白名单、围栏标题消毒、source 属性转义、Allowed 到达即置位（#60 #61 #74 #59 #67 #68 #73）
