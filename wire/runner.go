@@ -23,13 +23,36 @@ type Runner struct {
 	r io.Reader
 	// w 写端（Result 帧从这里出去）。
 	w io.Writer
+	// closer 底层连接（实现 io.Closer 时）。ctx 兜底路径用它解除阻塞读（#79）。
+	closer io.Closer
+	// closeOnce 连接只关一次。
+	closeOnce sync.Once
 	// writeMu 串行化写。
 	writeMu sync.Mutex
 }
 
 // NewRunner 构造子侧启动通道对端。
 func NewRunner(rw io.ReadWriter) *Runner {
-	return &Runner{r: rw, w: rw}
+	rn := &Runner{r: rw, w: rw}
+	if c, ok := rw.(io.Closer); ok {
+		rn.closer = c
+	}
+	return rn
+}
+
+// closeConn 关底层连接（幂等；无可关连接时为空操作）。
+//
+// ctx 兜底路径专用：父侧迟迟不下发（或已死掉但连接未断）时，子侧靠它
+// 自我了断——连接断开是协议里最强的取消信号（不变量 5）。
+func (rn *Runner) closeConn() {
+	if rn.closer == nil {
+		return
+	}
+	rn.closeOnce.Do(func() {
+		// 关连接产生的错误没有可采取的动作（连接本来就在被丢弃），
+		// 记入忽略——这不是吞判定错误，是停机路径。
+		_ = rn.closer.Close()
+	})
 }
 
 // AwaitStart 等父侧下发一次执行的启动帧。
@@ -38,27 +61,50 @@ func NewRunner(rw io.ReadWriter) *Runner {
 // （期间用**另一条**调用通道的 Client 请求工具）→ SendResult 回报结果。
 //
 // **只等一帧**——一次执行一个 Start。
-func (r *Runner) AwaitStart(ctx context.Context) (*Start, error) {
-	var start Start
-	if err := ReadFrame(r.r, &start); err != nil {
-		return nil, fmt.Errorf("wire: 读启动帧失败: %w", err)
+//
+// ctx 到期或取消时**必然返回**（#79）：主动关底层连接（可关时）解除阻塞读，
+// 返回包装了 ctx.Err() 的错误，不再无期等父侧。底层不实现 io.Closer 时
+// ctx 路径仍会返回，但阻塞中的读 goroutine 要等连接自然断开才退出。
+func (rn *Runner) AwaitStart(ctx context.Context) (*Start, error) {
+	type outcome struct {
+		start *Start
+		err   error
 	}
-	if err := checkVersion(start.V); err != nil {
-		return nil, err
+	done := make(chan outcome, 1)
+	goSafe(func() {
+		var start Start
+		if err := ReadFrame(rn.r, &start); err != nil {
+			done <- outcome{err: fmt.Errorf("wire: 读启动帧失败: %w", err)}
+			return
+		}
+		if err := checkVersion(start.V); err != nil {
+			done <- outcome{err: err}
+			return
+		}
+		if err := checkStart(&start); err != nil {
+			done <- outcome{err: err}
+			return
+		}
+		done <- outcome{start: &start}
+	})
+	select {
+	case o := <-done:
+		return o.start, o.err
+	case <-ctx.Done():
+		// 父侧不下发：关连接解除阻塞读，本侧自我了断（#79）。
+		rn.closeConn()
+		<-done // 等读 goroutine 退出（close 后必返回），不泄漏。
+		return nil, fmt.Errorf("wire: 等待启动帧时 ctx 到期（父侧未下发）: %w", ctx.Err())
 	}
-	if err := checkStart(&start); err != nil {
-		return nil, err
-	}
-	return &start, nil
 }
 
 // SendResult 回报一次执行的结果。
-func (r *Runner) SendResult(res Result) error {
+func (rn *Runner) SendResult(res Result) error {
 	res.V = Version
 	if err := checkResult(&res); err != nil {
 		return err
 	}
-	r.writeMu.Lock()
-	defer r.writeMu.Unlock()
-	return WriteFrame(r.w, res)
+	rn.writeMu.Lock()
+	defer rn.writeMu.Unlock()
+	return WriteFrame(rn.w, res)
 }

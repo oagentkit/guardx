@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -517,4 +519,313 @@ func TestClientUniqueIDs(t *testing.T) {
 		}
 	}
 	_ = fmt.Sprint()
+}
+
+// ---- #78：父侧执行单次调用期限（Request.DeadlineMS）----
+
+// rawCall 用原始帧层发起一次带 DeadlineMS 的调用并收一帧响应。
+//
+// Client 不暴露 DeadlineMS 字段，测试直接与 Server 帧来帧往——真管道、
+// 真超时，不用长 sleep 模拟。
+func rawCall(t *testing.T, child *readWriter, deadlineMS int64) (Response, time.Duration) {
+	t.Helper()
+	begin := time.Now()
+	if err := WriteFrame(child.w, Request{V: Version, ID: "d-1", Tool: "t", DeadlineMS: deadlineMS}); err != nil {
+		t.Fatalf("写帧失败: %v", err)
+	}
+	var resp Response
+	if err := ReadFrame(child.r, &resp); err != nil {
+		t.Fatalf("读帧失败: %v", err)
+	}
+	return resp, time.Since(begin)
+}
+
+// TestServerEnforcesRequestDeadline 子侧声明的 DeadlineMS 由父侧执行（#78）。
+//
+// 期限到：回类型化失败帧（kind=transient，toolfail 把超时归瞬时故障），
+// 迟到的成功结果不得投递；handler 的 ctx 在期限处被取消。
+func TestServerEnforcesRequestDeadline(t *testing.T) {
+	child, parent, cleanup := channelPair()
+	defer cleanup()
+
+	handlerDone := make(chan struct{})
+	server := NewServer(parent, func(ctx context.Context, req Request) (Response, error) {
+		// 规范 handler：等 ctx（修前这里拿到的 ctx 没有期限，等不到）。
+		<-ctx.Done()
+		close(handlerDone)
+		return Response{OK: true, Value: "迟到的结果"}, nil
+	})
+	go func() { _ = server.Serve(context.Background()) }()
+
+	resp, elapsed := rawCall(t, child, 50)
+	if resp.OK {
+		t.Fatal("期限到必须回失败帧，不得投递迟到的成功结果")
+	}
+	if resp.Kind != string(toolfail.ClassTransient) {
+		t.Errorf("分类=%q，应为 %s（超时归瞬时故障）", resp.Kind, toolfail.ClassTransient)
+	}
+	if !strings.Contains(resp.Error, "期限") {
+		t.Errorf("错误信息应说明期限，实得 %q", resp.Error)
+	}
+	if elapsed < 50*time.Millisecond {
+		t.Errorf("响应来得太早（%v），期限未被执行", elapsed)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("响应来得太晚（%v），父侧没在期限处兜底", elapsed)
+	}
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler 未随期限取消收尾")
+	}
+}
+
+// TestServerDeadlineFiresEvenIfHandlerIgnoresCtx 父侧兜底不依赖 handler 自觉（#78）。
+//
+// handler 完全不理 ctx（挂死到放行为止），期限到照样回失败帧；且在途闸
+// 在 handler 退出前**不还**——失控子进程不能用「声明短期限+挂死 handler」
+// 绕过在途上限刷 goroutine。
+func TestServerDeadlineFiresEvenIfHandlerIgnoresCtx(t *testing.T) {
+	child, parent, cleanup := channelPair()
+	defer cleanup()
+
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	server := NewServer(parent, func(ctx context.Context, req Request) (Response, error) {
+		entered <- struct{}{}
+		<-release // 装死：不碰 ctx，挂到测试放行
+		return Response{OK: true, Value: "v"}, nil
+	}, WithMaxInflight(1))
+	go func() { _ = server.Serve(context.Background()) }()
+
+	begin := time.Now()
+	if err := WriteFrame(child.w, Request{V: Version, ID: "d-1", Tool: "t", DeadlineMS: 50}); err != nil {
+		t.Fatalf("写帧失败: %v", err)
+	}
+	var resp Response
+	if err := ReadFrame(child.r, &resp); err != nil {
+		t.Fatalf("读帧失败: %v", err)
+	}
+	if elapsed := time.Since(begin); elapsed > 5*time.Second {
+		t.Errorf("响应来得太晚（%v），父侧没在期限处兜底", elapsed)
+	}
+	if resp.OK || resp.Kind != string(toolfail.ClassTransient) {
+		t.Fatalf("挂死的 handler 也要在期限处回类型化失败帧，实得 %+v", resp)
+	}
+	// 在途闸被挂死 handler 占住：第二个调用应被「超限」拒（不排队等）。
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("第一个调用未进入 handler")
+	}
+	if err := WriteFrame(child.w, Request{V: Version, ID: "d-2", Tool: "t"}); err != nil {
+		t.Fatalf("写第二帧失败: %v", err)
+	}
+	var resp2 Response
+	if err := ReadFrame(child.r, &resp2); err != nil {
+		t.Fatalf("读第二帧失败: %v", err)
+	}
+	if resp2.OK || resp2.Kind != string(toolfail.ClassRateLimited) || !strings.Contains(resp2.Error, "在途") {
+		t.Errorf("挂死 handler 退出前应占住在途名额，实得 %+v", resp2)
+	}
+	close(release)
+}
+
+// TestServerHandlerCtxCarriesDeadline 声明了期限 → handler 的 ctx 带 Deadline（#78）。
+func TestServerHandlerCtxCarriesDeadline(t *testing.T) {
+	child, parent, cleanup := channelPair()
+	defer cleanup()
+
+	seen := make(chan bool, 1)
+	server := NewServer(parent, func(ctx context.Context, req Request) (Response, error) {
+		_, has := ctx.Deadline()
+		seen <- has
+		return Response{OK: true}, nil
+	})
+	go func() { _ = server.Serve(context.Background()) }()
+
+	resp, _ := rawCall(t, child, 5000)
+	if !resp.OK {
+		t.Fatalf("远期期限不应打断正常调用，实得 %+v", resp)
+	}
+	if !<-seen {
+		t.Error("声明了 DeadlineMS 的调用，handler 的 ctx 必须带期限（父侧执行）")
+	}
+}
+
+// TestServerDeadlineCapsLongDeclaration 声明超宿主上限 → 按上限执行（#78）。
+//
+// 子侧声明只能把期限**调短**：60s 的声明撞上 80ms 的宿主上限，80ms 处打断。
+func TestServerDeadlineCapsLongDeclaration(t *testing.T) {
+	child, parent, cleanup := channelPair()
+	defer cleanup()
+
+	server := NewServer(parent, func(ctx context.Context, req Request) (Response, error) {
+		<-ctx.Done()
+		return Response{OK: true}, nil
+	}, WithMaxCallDeadline(80*time.Millisecond))
+	go func() { _ = server.Serve(context.Background()) }()
+
+	resp, elapsed := rawCall(t, child, 60_000)
+	if resp.OK || resp.Kind != string(toolfail.ClassTransient) {
+		t.Fatalf("超上限的声明必须被钳到上限并在该处打断，实得 %+v", resp)
+	}
+	if elapsed < 80*time.Millisecond {
+		t.Errorf("打断早于上限（%v）：钳制没生效，被声明带偏了", elapsed)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("打断晚于上限太多（%v）：父侧没兜住 60s 的声明", elapsed)
+	}
+}
+
+// TestServerDeadlineShorterDeclarationWins 声明比上限短 → 按声明（#78）。
+func TestServerDeadlineShorterDeclarationWins(t *testing.T) {
+	child, parent, cleanup := channelPair()
+	defer cleanup()
+
+	server := NewServer(parent, func(ctx context.Context, req Request) (Response, error) {
+		<-ctx.Done()
+		return Response{OK: true}, nil
+	}, WithMaxCallDeadline(5*time.Second))
+	go func() { _ = server.Serve(context.Background()) }()
+
+	resp, elapsed := rawCall(t, child, 50)
+	if resp.OK || resp.Kind != string(toolfail.ClassTransient) {
+		t.Fatalf("更短的声明必须赢过上限，实得 %+v", resp)
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("打断用了 %v，应是声明值 50ms（上限没被调短）", elapsed)
+	}
+}
+
+// TestServerDeadlineAppliesWhenUndeclared 没声明但宿主设了上限 → 也按上限（#78）。
+//
+// 「父侧必须自己兜住」：不设声明的调用不能因为子侧没说期限就没期限。
+func TestServerDeadlineAppliesWhenUndeclared(t *testing.T) {
+	child, parent, cleanup := channelPair()
+	defer cleanup()
+
+	server := NewServer(parent, func(ctx context.Context, req Request) (Response, error) {
+		<-ctx.Done()
+		return Response{OK: true}, nil
+	}, WithMaxCallDeadline(80*time.Millisecond))
+	go func() { _ = server.Serve(context.Background()) }()
+
+	resp, elapsed := rawCall(t, child, 0)
+	if resp.OK || resp.Kind != string(toolfail.ClassTransient) {
+		t.Fatalf("未声明 + 设了宿主上限：上限必须生效，实得 %+v", resp)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("打断用了 %v，上限 80ms 没生效", elapsed)
+	}
+}
+
+// ---- #80：输出字节预算真正拦截 + Close 真正停收 ----
+
+// TestServerMaxBytesRejectsOversizeOutput 超字节预算的响应必须被拒付（#80）。
+//
+// 修前 charge 的返回值被丢弃：响应整帧照投、usedBytes 恒为 0——MaxBytes 纯装饰。
+func TestServerMaxBytesRejectsOversizeOutput(t *testing.T) {
+	child, parent, cleanup := channelPair()
+	defer cleanup()
+
+	big := strings.Repeat("x", 1000)
+	server := NewServer(parent, func(ctx context.Context, req Request) (Response, error) {
+		return Response{OK: true, Value: big}, nil
+	}, WithBudget(Budget{MaxBytes: 100}))
+	go func() { _ = server.Serve(context.Background()) }()
+
+	if err := WriteFrame(child.w, Request{V: Version, ID: "b-1", Tool: "t"}); err != nil {
+		t.Fatalf("写帧失败: %v", err)
+	}
+	var resp Response
+	if err := ReadFrame(child.r, &resp); err != nil {
+		t.Fatalf("读帧失败: %v", err)
+	}
+	if resp.OK {
+		t.Fatal("超字节预算的响应必须被拒付，不得整帧投递")
+	}
+	if resp.Kind != string(toolfail.ClassRateLimited) {
+		t.Errorf("分类=%q，应为 %s（与调用数超限同款）", resp.Kind, toolfail.ClassRateLimited)
+	}
+	if !strings.Contains(resp.Error, "输出字节") {
+		t.Errorf("错误信息应说明输出字节超限，实得 %q", resp.Error)
+	}
+	// 超限的那次不落账：字节账应停在 0（charge 拒绝即不扣）。
+	if _, used := server.budget.Used(); used != 0 {
+		t.Errorf("已用字节=%d，应为 0（超限那次不记账）", used)
+	}
+}
+
+// TestServerMaxBytesAccumulatesAcrossCalls 字节预算跨调用累计，到线即拦（#80）。
+func TestServerMaxBytesAccumulatesAcrossCalls(t *testing.T) {
+	child, parent, cleanup := channelPair()
+	defer cleanup()
+
+	server := NewServer(parent, func(ctx context.Context, req Request) (Response, error) {
+		return Response{OK: true, Value: "12345"}, nil // 每次 5 字节
+	}, WithBudget(Budget{MaxBytes: 10}))
+	go func() { _ = server.Serve(context.Background()) }()
+
+	for i, wantOK := range []bool{true, true, false} {
+		if err := WriteFrame(child.w, Request{V: Version, ID: fmt.Sprintf("b-%d", i), Tool: "t"}); err != nil {
+			t.Fatalf("第 %d 帧写失败: %v", i, err)
+		}
+		var resp Response
+		if err := ReadFrame(child.r, &resp); err != nil {
+			t.Fatalf("第 %d 帧读失败: %v", i, err)
+		}
+		if resp.OK != wantOK {
+			t.Fatalf("第 %d 次调用 OK=%v，应为 %v（累计 %d 字节，上限 10）", i, resp.OK, wantOK, (i+1)*5)
+		}
+		if !wantOK && resp.Kind != string(toolfail.ClassRateLimited) {
+			t.Errorf("第 %d 次的分类=%q，应为 %s", i, resp.Kind, toolfail.ClassRateLimited)
+		}
+	}
+	if _, used := server.budget.Used(); used != 10 {
+		t.Errorf("已用字节=%d，应为 10（超限那次不记账）", used)
+	}
+}
+
+// TestServerCloseStopsServing Close() 真正停收（#80）。
+//
+// 修前 closed 是死字段：置位后 Serve 照常受理新调用。接线后：Serve 干净退出、
+// handler 不再执行、新调用因连接已断而失败。
+func TestServerCloseStopsServing(t *testing.T) {
+	// 用 net.Pipe：它是 io.ReadWriteCloser，Close 能解除阻塞中的读写。
+	parentConn, childConn := net.Pipe()
+	defer func() { _ = childConn.Close() }()
+	defer func() { _ = parentConn.Close() }()
+
+	var calls atomic.Int32
+	server := NewServer(parentConn, func(ctx context.Context, req Request) (Response, error) {
+		calls.Add(1)
+		return Response{OK: true}, nil
+	})
+	served := make(chan error, 1)
+	go func() { served <- server.Serve(context.Background()) }()
+
+	// 先确认服务端在收：来一次正常调用。
+	client := NewClient(childConn)
+	if _, err := client.Call(context.Background(), "t", ""); err != nil {
+		t.Fatalf("Close 前的调用应成功: %v", err)
+	}
+	if err := server.Close(); err != nil {
+		t.Fatalf("Close 应无错: %v", err)
+	}
+	select {
+	case err := <-served:
+		// Close 触发的停机是正常结束，不是协议故障。
+		if err != nil {
+			t.Errorf("Close 后 Serve 应干净返回 nil，实得 %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close 后 Serve 未退出（阻塞读未被解除）")
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("handler 执行次数=%d，应为 1（Close 后不得再执行）", n)
+	}
+	if _, err := client.Call(context.Background(), "t", ""); err == nil {
+		t.Error("Close 后新调用必须失败（连接已断，停收即停执行）")
+	}
 }

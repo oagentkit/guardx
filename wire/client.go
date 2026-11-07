@@ -48,7 +48,7 @@ func NewClient(rw io.ReadWriter) *Client {
 		w:       rw,
 		pending: map[string]chan Response{},
 	}
-	go c.readLoop()
+	goSafe(c.readLoop)
 	return c
 }
 

@@ -3,8 +3,11 @@ package wire
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/oagentkit/guardx/toolfail"
 )
@@ -52,6 +55,12 @@ type Handler func(ctx context.Context, req Request) (Response, error)
 //
 // 这是**可用性**约束，与 MaxCalls 的**配额**约束是两件事。
 //
+// # 单次调用期限由父侧执行（#78）
+//
+// Request.DeadlineMS 是子侧的声明，**父侧执行**：handler 收到的 ctx 带期限，
+// 期限到父侧直接回类型化失败帧（kind=transient），不等 handler。子侧声明只能
+// 把期限**调短**：超过宿主上限（WithMaxCallDeadline）按上限执行。
+//
 // # 取消传播（不变量 5）
 //
 // 父侧 ctx 取消 → 关闭连接 → 子侧读到 EOF → 子侧全部在途调用失败。
@@ -67,10 +76,20 @@ type Server struct {
 	budget *Budget
 	// sem 在途闸（不变量 4）。容量 = maxInflight。
 	sem chan struct{}
+	// maxCallDeadline 宿主自设的单次调用期限上限（#78）。0 = 不设。
+	//
+	// 子侧声明的 DeadlineMS 只能把期限**调短**不能调长——父侧是记账与取消的
+	// 权威（不变量 3/5），不能被子侧一句大数掀翻。
+	maxCallDeadline time.Duration
+	// closer 底层连接（实现 io.Closer 时）。Close() 用它停收：关连接解除
+	// 阻塞中的 ReadFrame，Serve 随之干净退出（#80）。
+	closer io.Closer
+	// closedFlag 停收标志（Close 置位，Serve 逐帧检查）。
+	closedFlag atomic.Bool
+	// closeOnce 保证 Close 幂等且只关一次连接。
+	closeOnce sync.Once
 	// writeMu 串行化写（响应帧并发产出，帧不能交错）。
 	writeMu sync.Mutex
-	// closed 已关闭。
-	closed bool
 }
 
 // ServerOption Server 的构造选项。
@@ -90,6 +109,19 @@ func WithMaxInflight(n int) ServerOption {
 	}
 }
 
+// WithMaxCallDeadline 设宿主侧的单次调用期限上限（#78）。
+//
+// 这是父侧对子侧声明（Request.DeadlineMS）的**钳制**：声明比它长按它执行，
+// 不声明也按它执行（父侧必须自己兜住，子进程说了不算）；声明比它短则按声明
+// （子侧只能把期限调短，不能调长）。<=0 = 不设上限（只执行子侧声明）。
+func WithMaxCallDeadline(d time.Duration) ServerOption {
+	return func(s *Server) {
+		if d > 0 {
+			s.maxCallDeadline = d
+		}
+	}
+}
+
 // NewServer 构造父侧服务端。
 func NewServer(rw io.ReadWriter, h Handler, opts ...ServerOption) *Server {
 	s := &Server{
@@ -99,6 +131,10 @@ func NewServer(rw io.ReadWriter, h Handler, opts ...ServerOption) *Server {
 		budget:  &Budget{},
 		sem:     make(chan struct{}, DefaultMaxInflight),
 	}
+	// 记下可关的底层连接：Close() 停收靠它解除阻塞中的读（#80）。
+	if c, ok := rw.(io.Closer); ok {
+		s.closer = c
+	}
 	for _, o := range opts {
 		if o != nil {
 			o(s)
@@ -107,19 +143,34 @@ func NewServer(rw io.ReadWriter, h Handler, opts ...ServerOption) *Server {
 	return s
 }
 
-// Serve 读-执行-回帧，直到 EOF 或出错。
+// Serve 读-执行-回帧，直到 EOF、Close 或出错。
 //
 // **协议层错误即终止**：版本不匹配、帧损坏——这些不是「某次调用失败」，
 // 是「两侧说的不是同一种话」，继续回帧只会产出更难查的错。
+//
+// Close() 停收（#80）：停收标志置位后不再受理新请求；若底层连接可关，
+// Close 已顺带关了它，阻塞中的读被解除，本循环干净返回 nil。
 func (s *Server) Serve(ctx context.Context) error {
 	for {
+		if s.isClosed() {
+			// Close() 停收：不再受理任何新调用。
+			return nil
+		}
 		var req Request
 		if err := ReadFrame(s.r, &req); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				// 子进程正常退出：读到底即结束。
 				return nil
 			}
+			if s.isClosed() {
+				// Close() 关连接触发的读错误是正常停机，不是协议故障。
+				return nil
+			}
 			return err
+		}
+		if s.isClosed() {
+			// 与 Close 并发竞态里读到的最后一帧也不受理。
+			return nil
 		}
 		if err := checkVersion(req.V); err != nil {
 			return err
@@ -148,19 +199,112 @@ func (s *Server) Serve(ctx context.Context) error {
 			})
 			continue
 		}
-		go s.serveOne(ctx, req)
+		goSafe(func() { s.serveOne(ctx, req) })
 	}
 }
 
 // serveOne 处理一次调用并回帧。
 func (s *Server) serveOne(ctx context.Context, req Request) {
 	defer func() { <-s.sem }()
-	resp := s.handle(ctx, req)
+	er := s.execute(ctx, req)
+	if er.written {
+		// 期限路径已就地回帧（见 execute），这里只负责还闸。
+		return
+	}
+	resp := er.resp
 	resp.V = Version
 	resp.ID = req.ID
-	// 输出字节记账在父侧（不变量 3）。
-	s.budget.charge(0, len(resp.Value))
+	// 输出字节记账在父侧（不变量 3）；超限即拒付整帧（#80）——既不静默整投
+	// （那是字节面失守），也不悄悄截断（截断会让子侧误以为拿到了完整结果）。
+	if !s.budget.charge(0, len(resp.Value)) {
+		_ = s.writeFrame(Response{
+			V: Version, ID: req.ID, OK: false,
+			Kind:  string(toolfail.ClassRateLimited),
+			Error: "输出字节配额已用尽",
+		})
+		return
+	}
 	_ = s.writeFrame(resp)
+}
+
+// execResult 一次调用的执行产物。
+type execResult struct {
+	// resp handler 产出的响应（written=true 时为零值）。
+	resp Response
+	// written 响应已在 execute 内回帧（期限到路径），serveOne 不必再写。
+	written bool
+}
+
+// callDeadline 算这次调用的父侧执行期限（#78）。
+//
+// 取子侧声明（DeadlineMS）与宿主上限（WithMaxCallDeadline）的**较小者**：
+// 声明超上限按上限（子侧只能调短不能调长），没声明但设了上限也按上限
+// （父侧必须自己兜住）。两者都没有 = 0 = 不限期。
+func (s *Server) callDeadline(req Request) time.Duration {
+	var d time.Duration
+	if req.DeadlineMS > 0 {
+		d = time.Duration(req.DeadlineMS) * time.Millisecond
+	}
+	if s.maxCallDeadline > 0 && (d <= 0 || d > s.maxCallDeadline) {
+		d = s.maxCallDeadline
+	}
+	return d
+}
+
+// execute 在期限约束下执行一次调用（#78）。
+//
+// 期限到即回**类型化失败帧**（kind=transient——toolfail 把超时归瞬时故障），
+// 不等 handler 返回——期限一到，结果对子侧已无意义；handler 是否理会 ctx 是
+// 宿主的事，父侧不把「兜住期限」寄托在 handler 自觉上。
+//
+// 但在途闸要等 handler goroutine 退出才还：否则失控子进程可以用
+// 「声明短期限 + 挂死 handler」绕过在途上限无限刷 goroutine。挂死的 handler
+// 占住名额与修前行为一致（占住即拒绝新调用），进程级兜底（WallClock/杀进程）
+// 仍在它之上。
+func (s *Server) execute(ctx context.Context, req Request) execResult {
+	d := s.callDeadline(req)
+	if d <= 0 {
+		return execResult{resp: s.handle(ctx, req)}
+	}
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, d)
+	defer cancel()
+
+	done := make(chan Response, 1)
+	goSafe(func() {
+		// panic 也要喂满 done：否则期限分支的 <-done 会永久吊死一个名额。
+		defer func() {
+			if r := recover(); r != nil {
+				done <- Response{
+					OK:    false,
+					Kind:  string(toolfail.ClassUnknown),
+					Error: fmt.Sprintf("handler panic: %v", r),
+				}
+			}
+		}()
+		done <- s.handle(ctx, req)
+	})
+
+	select {
+	case resp := <-done:
+		return execResult{resp: resp}
+	case <-ctx.Done():
+		// 响亮、有类型：期限到/被取消都回失败帧，绝不静默吞掉在途调用。
+		resp := Response{
+			V:    Version,
+			ID:   req.ID,
+			OK:   false,
+			Kind: string(toolfail.ClassTransient),
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			resp.Error = fmt.Sprintf("调用期限已到（父侧执行，声明 DeadlineMS=%d）: %v", req.DeadlineMS, ctx.Err())
+		} else {
+			resp.Error = fmt.Sprintf("调用被父侧取消: %v", ctx.Err())
+		}
+		_ = s.writeFrame(resp)
+		<-done // 等 handler goroutine 退出（ctx 已取消，规范 handler 会退；不退的占住名额，见上）。
+		return execResult{written: true}
+	}
 }
 
 // handle 执行一次调用并构造响应帧。
@@ -249,12 +393,26 @@ func (b *Budget) charge(calls, bytes int) bool {
 	return true
 }
 
-// Close 关闭服务端（幂等）。
+// Close 关闭服务端（幂等，#80 接线）。
 //
-// 关闭只停**接受新调用**；已在途的调用由各自 goroutine 收尾。
+// 「关闭只停接受新调用」由此真正落地：
+//   - 置停收标志：Serve 循环逐帧检查，不再受理新请求；
+//   - 关底层连接（若实现 io.Closer）：解除阻塞中的读，Serve 干净返回 nil；
+//     子侧随即读到 EOF，其在途调用全部失败（不变量 5——管道关闭就是取消信号）。
+//
+// 已在途的调用仍由各自 goroutine 收尾（向已关连接回帧会失败、被忽略）。
+// 底层不实现 io.Closer 时标志立即生效，但阻塞中的那次读要等连接自然断开。
 func (s *Server) Close() error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	s.closed = true
-	return nil
+	var err error
+	s.closeOnce.Do(func() {
+		s.closedFlag.Store(true)
+		if s.closer != nil {
+			// 关连接解除阻塞中的读；由此触发的读写错误是停机的一部分。
+			err = s.closer.Close()
+		}
+	})
+	return err
 }
+
+// isClosed 报告是否已停收。
+func (s *Server) isClosed() bool { return s.closedFlag.Load() }
