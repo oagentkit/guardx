@@ -61,8 +61,13 @@ type Policy struct {
 	// 缺省会解析 DNS，并把**全部解析结果**逐个过 IP 围栏（私网/链路本地/
 	// 云元数据等一律拒绝，解析失败/空结果 fail-closed）。组织 DNS（或被
 	// 劫持的内网 DNS）把名单里的域名解析到内网的借道形态由此被挡住。
-	// IP 字面量条目（如 "127.0.0.1"）不受此围栏管：写进名单本身就是
-	// 调用方对这个地址的显式意图。
+	//
+	// ⚠️ 对 **IP 字面量**条目（guardx#119）：逐字写进名单（如 "127.0.0.1"）
+	// 才是调用方对这个地址的**显式意图**，返回自身供拨号钉住、不走解析；
+	// 通配命中（"*" 或 "*.x"）只说明「没写任何地址/没写这个地址」，**不构成**
+	// 显式意图——此时字面量照样过 IP 围栏（黑名单模式下 169.254.169.254 /
+	// 127.0.0.1 一类不放行）。同一个地址换个写法结论相反的形态不被允许
+	// （#96 修复说明：同仓两个包对「域名→IP」这一步的治理必须同一套）。
 	AllowHosts []string
 	// DenyHosts 拒绝的目标主机（语义同 AllowHosts，**优先于** AllowHosts）。
 	DenyHosts []string
@@ -86,6 +91,11 @@ type Policy struct {
 	// ⚠️ 这是对「解析到内网的域名照转」**解防**的显式开关——只该在宿主
 	// 明确接受「域名=零 DNS 防护」的轻量档使用（与 egress 包对裸 CheckHost
 	// 的警示同一口径）。缺省必须是解析 + fail-closed。
+	//
+	// 豁免范围（guardx#119 收敛）：跳过的只是**域名解析**——IP 字面量与
+	// exotic IPv4 词法形态（0177.0.0.1 一类）的**字面量层判定不豁免**
+	// （前者照常过 IP 围栏并返回已检地址，后者照常拒绝）：那些判定不是
+	// 解析判定，地址写法本身的危险不随「不解析」消失。
 	SkipDNSCheck bool
 }
 
@@ -162,15 +172,19 @@ func (p Policy) Permit(host string, port int) error {
 //  1. 名单判定（与既有口径一致）：空主机 / 命中拒绝名单 / 放行名单为空 /
 //     不在放行名单内 / 端口未放行——先于一切 DNS 查询，未过的目标不触发
 //     解析（fail-fast，也不给任意域名当解析器用）；
-//  2. DNS 围栏（guardx#96）：域名 host 经 Resolver（nil 时
+//  2. IP 字面量 host（netip 可解析的）：**逐字**命中名单才是显式意图，
+//     返回该地址本身，不触发解析（guardx#119）；通配命中（"*" / "*.x"）
+//     不构成显式意图——字面量照样过 IP 围栏（字面量无解析步骤，本步与
+//     SkipDNSCheck 无关：那个开关关的是「域名解析」，不是「地址本身的
+//     IP 判定」）；
+//  3. DNS 围栏（guardx#96）：域名 host 经 Resolver（nil 时
 //     net.DefaultResolver）解析，**全部解析结果**逐个过与 egress 同一套
 //     IP 围栏（egress.Policy 零值：私网/回环/链路本地（含云元数据）/CGNAT/
 //     组播/保留段一律拒绝，只放公网）；解析失败、解析结果为空、解析出
 //     判定不了的地址都 fail-closed。exotic IPv4 词法形态（127.1 /
 //     0x7f000001——inet_aton 语义会被 cgo resolver 解析成回环）在词法层
-//     直接拒绝；
-//  3. IP 字面量 host（netip 可解析的）：名单判定即显式意图，返回该地址
-//     本身，不触发解析。
+//     直接拒绝——这一条**不受 SkipDNSCheck 豁免**（它不是解析判定，
+//     是字面量词法判定；SkipDNSCheck=true 时同样执行）。
 //
 // # 返回值与 TOCTOU
 //
@@ -179,7 +193,7 @@ func (p Policy) Permit(host string, port int) error {
 // 的 TOCTOU——egress#60 修复说明明确了「返回全部已检地址供拨号钉住是闭合
 // check/use 间 TOCTOU 的前提」，CONNECT 隧道（长连接，TOCTOU 窗口更大）
 // 尤其需要钉住。SkipDNSCheck 为 true 时返回 (nil, nil)：无已检地址，调用方
-// 按主机名拨号。
+// 按主机名拨号（IP 字面量除外——见第 2 步，字面量照常返回已检地址）。
 func (p Policy) PermitResolving(ctx context.Context, host string, port int) ([]netip.Addr, error) {
 	h := normalizeHost(host)
 	if h == "" {
@@ -197,12 +211,34 @@ func (p Policy) PermitResolving(ctx context.Context, host string, port int) ([]n
 	if !p.portAllowed(port) {
 		return nil, &BlockedError{Host: h, Port: port, Reason: "端口不在放行端口内"}
 	}
-	// IP 字面量：名单命中即调用方的显式意图（写进名单的就是这个地址），
-	// 返回自身供拨号钉住，不走解析。
+	// IP 字面量（guardx#119）：逐字命中名单 = 调用方确实写了这个地址
+	// （显式意图），返回自身供拨号钉住；通配命中（"*" / "*.x"）只是
+	// 「没写任何地址」，落到 IP 围栏——169.254.169.254 / 127.0.0.1 一类
+	// 在黑名单模式下不放行。这一步在 SkipDNSCheck 之前：字面量判定不是
+	// DNS 判定，不被「跳过解析」豁免。
 	if addr, err := netip.ParseAddr(h); err == nil {
-		return []netip.Addr{addr}, nil
+		if matchExact(p.AllowHosts, h) {
+			return []netip.Addr{addr}, nil
+		}
+		addrs, err := egress.CheckHostResolving(ctx, h, egress.Policy{}, p.resolver())
+		if err != nil {
+			return nil, &BlockedError{Host: h, Port: port, Reason: "IP 围栏（通配命中不豁免，fail-closed）: " + err.Error()}
+		}
+		for i := range addrs {
+			addrs[i] = addrs[i].Unmap()
+		}
+		return addrs, nil
 	}
 	if p.SkipDNSCheck {
+		// 显式跳过的是**域名解析**；字面量层判定不在豁免范围——exotic IPv4
+		// 词法形态（0177.0.0.1 / 0x7f000001 / 127.1）会被宽松解析器
+		// （inet_aton 语义）解析成回环，属词法判定而非解析判定，与判定
+		// 文档一致照常执行（egress.CheckHost 对这类形态 fail-closed，
+		// 对普通域名放行——跳过解析正是本开关的语义）。IP 字面量已在
+		// 上一分支全部过围栏，走不到这里。
+		if err := egress.CheckHostWith(h, egress.Policy{}); err != nil {
+			return nil, &BlockedError{Host: h, Port: port, Reason: "字面量围栏（exotic IPv4 词法形态不受 SkipDNSCheck 豁免）: " + err.Error()}
+		}
 		return nil, nil
 	}
 	// DNS 围栏（guardx#96）：复用 egress.CheckHostResolving——同仓两个包对
@@ -271,6 +307,20 @@ func matchAny(patterns []string, host string) bool {
 			if strings.HasSuffix(host, suffix) && len(host) > len(suffix) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// matchExact 判 host 是否被**逐字**写进名单（归一后全等比较）。
+//
+// 与 matchAny 的差别只在通配："*" 与 "*.suffix" 的命中不算逐字——通配命中
+// 只说明「没写任何地址 / 没写这个地址」，不构成对某个具体地址的显式意图
+// （guardx#119：IP 字面量的「名单即意图」豁免只认逐字命中）。
+func matchExact(patterns []string, host string) bool {
+	for _, raw := range patterns {
+		if normalizeHost(raw) == host {
+			return true
 		}
 	}
 	return false
