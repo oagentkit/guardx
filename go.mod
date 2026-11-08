@@ -2,4 +2,4 @@ module github.com/oagentkit/guardx
 
 go 1.24.0
 
-require github.com/oekit/pkg v0.37.6
+require github.com/oekit/pkg v0.38.0
