@@ -30,6 +30,23 @@
 // 拨号层判的是**拨号地址的字面量**，用的是与写面同一个判定函数，不做 DNS
 // 解析层判定（与本包「只做字面量判定」的既有口径一致）。
 //
+// # 与 oekit/pkg/urlguard 的分工（选型定位，guardx#118）
+//
+// 生态里有**两套**出站 SSRF 判定：本包与 oekit/pkg/urlguard。分工：
+//
+//   - **LLM 可控 URL**（模型决定目标——提示词注入的直接落点）→ 本包：
+//     Policy 具名放行面 + CheckResolving（解析后判定 + 已检地址钉住）+
+//     Policy.NewClient（拨号层 + 重定向双重守卫）是 urlguard 没有的组合；
+//   - **自配 webhook 出站**（管理员配置的固定 URL）→ urlguard：
+//     WithExactHosts（精确 authority 钉版）、WithAllowDomains、
+//     WithCheckIPFunc/WithCheckHostFunc 自定义策略钩子是本包没有的入口；
+//   - 两边共享同一份**禁止段口径**（私网/回环/链路本地/CGNAT/special-use
+//     IPv6/exotic IPv4 字面量），等价性由本包的 urlguard_equiv_test.go
+//     语料测试钉住——任一侧段表漂移，CI 即红（判定表不双维护的守门）。
+//
+// 能力对照矩阵见本仓 README「出站防护选型」。子进程/原生工具的流量不在
+// 两者射程内——那是 egressproxy（本地代理）的职责。
+//
 // 用法：
 //
 //	if err := egress.Check(u); err != nil { …拒绝抓取… }
@@ -268,7 +285,15 @@ func ipv4Policy(a netip.Addr, p Policy) string {
 
 // ipv6SpecialUse 标准库判定之外的 special-use IPv6 段（对标 ZCode
 // SPECIAL_USE_IPV6_NETWORKS + ipaddr.js 文档/6to4/Teredo 段）。
+//
+// 与 oekit/pkg/urlguard 的缺省阻断表保持同一口径（guardx#118，等价性由
+// urlguard_equiv_test.go 的语料测试钉住）：::/96（IPv4-compatible，RFC 4291
+// 已废弃——::127.0.0.1 即回环的 IPv6 写法，属 4in6 同族的经典逃逸路径）与
+// fec0::/10（site-local，RFC 3879 已废弃但企业网历史在用）由 urlguard 语料
+// 比对发现本表缺段后补齐。
 var ipv6SpecialUse = []netip.Prefix{
+	netip.MustParsePrefix("::/96"),          // IPv4-compatible（::127.0.0.1 即回环的 IPv6 写法；RFC 4291 已废弃）
+	netip.MustParsePrefix("fec0::/10"),      // site-local（RFC 3879 已废弃，企业网历史在用）
 	netip.MustParsePrefix("64:ff9b:1::/48"), // NAT64 本地 use（不还原）
 	netip.MustParsePrefix("100::/64"),       // discard-only
 	netip.MustParsePrefix("2001:2::/48"),    // benchmark
