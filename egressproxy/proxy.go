@@ -1,12 +1,15 @@
 package egressproxy
 
 import (
+	"context"
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/oagentkit/guardx/sandbox"
@@ -16,6 +19,11 @@ import (
 // dialTimeout 连接目标的期限。够长以覆盖跨境 RTT，够短以不把一次挂起的
 // 目标拖成整条工具调用的超时。
 const dialTimeout = 10 * time.Second
+
+// pinnedAddrsKey 请求上下文里「这条请求的已检地址」（guardx#96）：写面
+// PermitResolving 解析并全量过 IP 围栏后放进请求 ctx，拨号面取出来钉住
+// ——拨号只连已检地址，不再二次解析。
+type pinnedAddrsKey struct{}
 
 // Proxy 本地出口代理（HTTP 转发 + CONNECT 隧道）。
 //
@@ -34,16 +42,35 @@ func New(p Policy) (*Proxy, error) {
 		return nil, err
 	}
 	d := &net.Dialer{Timeout: dialTimeout}
+	tr := &http.Transport{
+		// 自己绝不再经过一个代理：配置文件里的 HTTP_PROXY 会让它把请求
+		// 转给另一个代理，形成自环或把流量交给不受控的第三方。
+		Proxy:             nil,
+		DialContext:       d.DialContext,
+		DisableKeepAlives: true,
+	}
+	// 拨号面钉住（guardx#96）：请求 ctx 里带已检地址时只连它们（字面量
+	// 直连 + Control 复核，闭合 check/use 间 TOCTOU）；没有已检地址
+	// （SkipDNSCheck / 旧形态）回落按主机名拨号。端口读不出来按
+	// fail-closed 报错——已检地址是对请求端口过检的，拨别的端口没有依据。
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if addrs, ok := ctx.Value(pinnedAddrsKey{}).([]netip.Addr); ok && len(addrs) > 0 {
+			_, portStr, perr := net.SplitHostPort(addr)
+			if perr != nil {
+				return nil, errors.Errorf("egressproxy: 已钉拨号地址 %q 不是 host:port 形态", addr)
+			}
+			portNum, aerr := strconv.Atoi(portStr)
+			if aerr != nil || portNum < 1 || portNum > 65535 {
+				return nil, errors.Errorf("egressproxy: 已钉拨号端口 %q 非法", portStr)
+			}
+			return pinnedDial(d, ctx, addrs, portNum)
+		}
+		return d.DialContext(ctx, network, addr)
+	}
 	return &Proxy{
-		policy: p,
-		dialer: d,
-		transport: &http.Transport{
-			// 自己绝不再经过一个代理：配置文件里的 HTTP_PROXY 会让它把请求
-			// 转给另一个代理，形成自环或把流量交给不受控的第三方。
-			Proxy:             nil,
-			DialContext:       d.DialContext,
-			DisableKeepAlives: true,
-		},
+		policy:    p,
+		dialer:    d,
+		transport: tr,
 	}, nil
 }
 
@@ -95,7 +122,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.serveForward(w, r)
 }
 
-// serveConnect 处理 `CONNECT host:port`：先准入，再建隧道，之后只搬字节。
+// serveConnect 处理 `CONNECT host:port`：先准入（含 DNS 围栏），按已检
+// 地址拨号建隧道，之后只搬字节。
 func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 	host, port, err := splitHostPort(r.Host, 443)
 	if err != nil {
@@ -103,11 +131,12 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// CONNECT 的方法恒为 CONNECT，Limited 在这里无法区分读写——见 Policy.Limited 的边界说明。
-	if err := p.policy.Permit(host, port); err != nil {
+	addrs, err := p.policy.PermitResolving(r.Context(), host, port)
+	if err != nil {
 		p.reject(w, err)
 		return
 	}
-	target, err := p.dialer.DialContext(r.Context(), "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	target, err := p.dialTarget(r.Context(), host, addrs, port)
 	if err != nil {
 		http.Error(w, "egressproxy: 连接目标失败: "+err.Error(), http.StatusBadGateway)
 		return
@@ -133,6 +162,25 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 		_ = target.Close()
 		return
 	}
+	// #99：hijack 时 bufrw.Reader 里可能已缓冲了客户端在同一 TCP 段里
+	// pipeline 过来的早期数据（如紧随 CONNECT 的 TLS ClientHello）——
+	// net/http 的 Hijack 契约写明 Reader 可能持有未处理字节。pump 只读
+	// 裸连接、不再经过 bufrw，这些字节若不先灌进隧道就被静默吞掉（隧道
+	// 停摆：目标等不到 ClientHello，客户端等不到 ServerHello）。先排空
+	// 缓冲，再开始双向拷贝。
+	if n := bufrw.Reader.Buffered(); n > 0 {
+		buf := make([]byte, n)
+		if _, err := io.ReadFull(bufrw.Reader, buf); err != nil {
+			_ = client.Close()
+			_ = target.Close()
+			return
+		}
+		if _, err := target.Write(buf); err != nil {
+			_ = client.Close()
+			_ = target.Close()
+			return
+		}
+	}
 	pump(client, target)
 }
 
@@ -147,7 +195,8 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 		p.reject(w, &BlockedError{Host: host, Port: port, Reason: "只读模式下只允许 GET/HEAD，收到 " + r.Method})
 		return
 	}
-	if err := p.policy.Permit(host, port); err != nil {
+	addrs, err := p.policy.PermitResolving(r.Context(), host, port)
+	if err != nil {
 		p.reject(w, err)
 		return
 	}
@@ -156,6 +205,11 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 	out.URL.Scheme = "http"
 	out.URL.Host = net.JoinHostPort(host, strconv.Itoa(port))
 	stripHopByHop(out.Header)
+	// 已检地址放进请求 ctx：transport 的 DialContext 取出来钉住拨号
+	// （guardx#96——写面检查的地址集与拨号面连接的地址集同源）。
+	if len(addrs) > 0 {
+		out = out.WithContext(context.WithValue(out.Context(), pinnedAddrsKey{}, addrs))
+	}
 
 	resp, err := p.transport.RoundTrip(out)
 	if err != nil {
@@ -167,6 +221,52 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 	copyHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+// dialTarget 连接目标：有已检地址时只连它们（guardx#96 拨号钉住）；没有
+// （SkipDNSCheck / 字面量围栏关闭的旧形态）按主机名拨号。
+func (p *Proxy) dialTarget(ctx context.Context, host string, addrs []netip.Addr, port int) (net.Conn, error) {
+	if len(addrs) == 0 {
+		return p.dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	}
+	return pinnedDial(p.dialer, ctx, addrs, port)
+}
+
+// pinnedDial 逐个已检地址字面量直连（guardx#96 拨号钉住）——不再二次解析，
+// 闭合「检查后换解析」的 TOCTOU；并挂 Control 复核实际拨号地址必须属于
+// 已检集合（纵深：哪怕拨号路径将来多出回退分支，逃不出这份集合）。
+func pinnedDial(d *net.Dialer, ctx context.Context, addrs []netip.Addr, port int) (net.Conn, error) {
+	allowed := make(map[string]struct{}, len(addrs))
+	for _, a := range addrs {
+		allowed[a.String()] = struct{}{}
+	}
+	pin := *d
+	pin.Control = func(network, address string, _ syscall.RawConn) error {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			return errors.Errorf("egressproxy: 已钉拨号地址 %q 不是 host:port 形态", address)
+		}
+		got, err := netip.ParseAddr(host)
+		if err != nil {
+			return errors.Errorf("egressproxy: 已钉拨号地址 %q 不是 IP 字面量", address)
+		}
+		if _, ok := allowed[got.Unmap().String()]; !ok {
+			return &BlockedError{Host: host, Port: port, Reason: "拨号地址 " + got.String() + " 不在已检地址集合内（TOCTOU 钉住）"}
+		}
+		return nil
+	}
+	var lastErr error
+	for _, a := range addrs {
+		c, err := pin.DialContext(ctx, "tcp", net.JoinHostPort(a.String(), strconv.Itoa(port)))
+		if err == nil {
+			return c, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("egressproxy: 没有可拨的已检地址")
+	}
+	return nil, lastErr
 }
 
 // reject 统一拒绝形态：403 + 结构化原因（响应头带上原因，便于调用方区分

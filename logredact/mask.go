@@ -1,6 +1,8 @@
 package logredact
 
 import (
+	"net"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -9,9 +11,9 @@ import (
 )
 
 // Masker 低敏感掩码+令牌回填器（K8sGPT anonymize 形态，bianque spec
-// 2026-09-14-aiops-uplift-design §3）：把目标机拓扑标识（IPv4 + 调用方注册的精确串）
-// 在进 LLM 前替换为 «Tn» 令牌，在最终展示面 Restore 回填原名——LLM 解释里引用的
-// 「主机 «T1»」在报告中还原为真名，可读性与隐私兼得。
+// 2026-09-14-aiops-uplift-design §3）：把目标机拓扑标识（IPv4/IPv6 + 调用方
+// 注册的精确串）在进 LLM 前替换为 «Tn» 令牌，在最终展示面 Restore 回填原名
+// ——LLM 解释里引用的「主机 «T1»」在报告中还原为真名，可读性与隐私兼得。
 //
 // 分级纪律：高敏感（密码/密钥/连接串/Bearer）不走本机制——那是 Redact 的领域，
 // 删除后永不回填；Masker 只收低敏感拓扑标识，且回填只发生在展示面、不回灌二次
@@ -31,6 +33,52 @@ func NewMasker() *Masker {
 
 // ipv4Re 低敏感默认模式：IPv4 地址（工具输出里最常见的拓扑标识）。
 var ipv4Re = regexp.MustCompile(`\b(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}\b`)
+
+// ipv6Re 低敏感默认模式的 IPv6 侧（guardx#100）：双栈/K8s 环境里 IPv6
+// （fe80::1、2001:db8::5、::1、链路本地 zone 形）与 IPv4 同为常态拓扑标识，
+// 默认模式只有 IPv4 时它们原文直通 LLM 输入——漏 mask 是本包纪律里的事故
+// 方向，故 IPv6 与 IPv4 同等待遇（同 «Tn» 令牌空间、同址恒同令牌、Restore
+// 回填）。
+//
+// 刻意不手写完整 IPv6 文法：**宽松捕获候选 + net.ParseIP 精确验证** 两段式。
+// 理由有二。其一，RE2 无环视，完整文法离不开边界字符的消耗与回填；其二，
+// 完整文法是多分支 alternation，Go regexp 取「最左优先」而非「最左最长」，
+// 缩写形态会被更短的分支提前截断（如 2001:db8::5 被 `1::` 形态分支截成
+// `2001:db8::`，剩下个裸 `5`）。候选词法只要求「至少两个冒号的
+// 十六进制/点/冒号连续段（可带 [ ] 括号与 %zone 后缀）」——时间（12:30:45）、
+// MAC（aa:bb:cc:dd:ee:ff）、作用域符（std::cafe）等同样满足候选词法，但
+// ParseIP 判负后原样保留；宁可在候选层多验几段，不在结果层漏一段。
+var ipv6Re = regexp.MustCompile(
+	`(?:^|[^0-9A-Za-z_:])` + // 左边界：串首或「非字母数字冒号」的字符（消耗后在替换里回填）
+		`(?:\[[0-9A-Fa-f:.%]*:[0-9A-Fa-f:.%]*:[0-9A-Fa-f:.%]*\]` + // 括号形（URL/Host 头形态，内含至少两个冒号）
+		`|[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*(?:%[0-9A-Za-z._~-]+)?)`) // 裸形 + 可选 zone 后缀
+
+// isIPv6CandByte 候选片段的首字符集（区别「左边界字符」与「候选本体」）：
+// 候选只能以十六进制位、冒号、点或左括号开头。
+func isIPv6CandByte(c byte) bool {
+	switch {
+	case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		return true
+	case c == ':' || c == '.' || c == '[':
+		return true
+	}
+	return false
+}
+
+// isIPv6Literal 候选片段的精确验证：剥掉括号形与 %zone 后缀后交
+// net.ParseIP——候选词法保证片段至少含两个冒号，纯点分十进制的 IPv4 进不了
+// 候选，故 ParseIP 判过即 IPv6（含 ::ffff:1.2.3.4 这类 v4 映射形态）。
+func isIPv6Literal(cand string) bool {
+	s := cand
+	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
+		s = s[1 : len(s)-1]
+	}
+	if i := strings.IndexByte(s, '%'); i >= 0 {
+		s = s[:i]
+	}
+	ip := net.ParseIP(s)
+	return ip != nil && ip.To16() != nil
+}
 
 // tokenRe 令牌形态（Restore 只认本包签发的全角书名号+序号）。
 var tokenRe = regexp.MustCompile(`«T([0-9]+)»`)
@@ -57,8 +105,9 @@ func (m *Masker) maskLocked(v string) string {
 	return tok
 }
 
-// Mask 掩码文本：先精确注册串，再 IPv4 模式（动态注册，同址恒同令牌）。
-// 结构化数据的双视图入口见 MaskValue（逐字符串值 walk，无序列化往返）。
+// Mask 掩码文本：先精确注册串，再 IPv6 / IPv4 模式（动态注册，同址恒同
+// 令牌）。结构化数据的双视图入口见 MaskValue（逐字符串值 walk，无序列化
+// 往返）。
 func (m *Masker) Mask(s string) string {
 	if s == "" {
 		return s
@@ -93,6 +142,14 @@ func (m *Masker) Count() int {
 // 面（guardx#44）——逆向 Restore 的同款结构假设不再被要求。map/slice 下探，
 // 标量原样；输出的 map 为副本（不污染入参）。与 RedactValueOpts 同构的
 // walk 形态，语义是 Mask（低敏感拓扑标识）不是 Redact（高敏感不回填）。
+//
+// 类型化容器（map[string]string / []string / []map[string]any / struct 导出
+// 字段 / 指针，guardx#101）同样下探——与 #63/#76 给 RedactValue 的
+// redactReflect 同源：类型开关只认 any 解码形态时，Go 侧类型化容器落
+// default 原样返回，是「零令牌零报错的静默漏掩」，比它替代的序列化往返
+// 更糟。边界与 redactReflect 一致：json.Number 特赦（数字字面量不是文本）、
+// []byte 豁免（二进制不是文本）、未导出字段不可读原样保留、输出为副本、
+// 深度上限防自引用环。
 func (m *Masker) MaskValue(v any) any {
 	return m.walkValue(v, maskWalk)
 }
@@ -133,12 +190,139 @@ func (m *Masker) walkValue(v any, kind walkKind) any {
 		}
 		return out
 	default:
+		// 类型化容器反射下探（guardx#101）：与 redactReflect 同源——
+		// map[string]string / []string / struct / 指针等 Go 侧类型化容器
+		// 此前原样返回（静默漏掩）。
+		return m.walkReflect(v, kind, 0)
+	}
+}
+
+// walkReflect 类型化容器的反射下探（guardx#101）：语义与 redactReflect 同构，
+// 叶子变换换成「掩码/回填令牌」——字符串叶子（含命名 string）过
+// maskStringLocked / restoreStringLocked，map/slice/array/struct/指针/接口
+// 逐层下探并保形拷贝（输出为副本，不污染入参）。与 any 形态同一份锁纪律：
+// 只在字符串叶子上取 m.mu，不跨递归持锁。
+//
+// 刻意的边界（与 redactReflect 一致）：
+//   - json.Number 特赦——命名 string 但它是数字字面量不是文本；其余命名
+//     string 类型（type HostID string）仍是文本，掩码后经 Convert 还型。
+//   - []byte 是二进制载荷不是文本，逐字节下探只有拷贝开销没有检测面。
+//   - 未导出字段反射不可读，原样保留。
+//   - 深度上限 maxWalkDepth 防类型化 Go 值的自引用环（JSON 解码值不可能
+//     成环，类型化容器可以）；超限容器原样返回，字符串叶子不受影响。
+func (m *Masker) walkReflect(v any, kind walkKind, depth int) any {
+	rv := reflect.ValueOf(v)
+	if !rv.IsValid() {
+		return v
+	}
+	// any 形态快路径：交回类型开关，键不动/副本契约同一份实现（嵌在类型化
+	// 容器里的 any 容器与顶层 any 容器行为一致）。
+	switch rv.Type() {
+	case mapStringAnyType, sliceAnyType:
+		return m.walkValue(rv.Interface(), kind)
+	}
+	switch rv.Kind() {
+	case reflect.String:
+		if rv.Type() == jsonNumberType {
+			return v
+		}
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if kind == maskWalk {
+			return m.maskStringLocked(rv.String())
+		}
+		return m.restoreStringLocked(rv.String())
+	case reflect.Map:
+		if rv.IsNil() || depth >= maxWalkDepth {
+			return v
+		}
+		out := reflect.MakeMapWithSize(rv.Type(), rv.Len())
+		it := rv.MapRange()
+		for it.Next() {
+			out.SetMapIndex(it.Key(), m.walkAssignable(it.Value(), rv.Type().Elem(), kind, depth+1))
+		}
+		return out.Interface()
+	case reflect.Slice, reflect.Array:
+		if (rv.Kind() == reflect.Slice && rv.IsNil()) || depth >= maxWalkDepth {
+			return v
+		}
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			return v // []byte：二进制载荷不是文本
+		}
+		var out reflect.Value
+		if rv.Kind() == reflect.Slice {
+			out = reflect.MakeSlice(rv.Type(), rv.Len(), rv.Len())
+		} else {
+			out = reflect.New(rv.Type()).Elem()
+			out.Set(rv)
+		}
+		for i := 0; i < rv.Len(); i++ {
+			out.Index(i).Set(m.walkAssignable(rv.Index(i), rv.Type().Elem(), kind, depth+1))
+		}
+		return out.Interface()
+	case reflect.Struct:
+		if depth >= maxWalkDepth {
+			return v
+		}
+		t := rv.Type()
+		out := reflect.New(t).Elem()
+		out.Set(rv) // 先整体拷贝再覆写下探结果：未导出字段与无需处理的原样保留
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			if !f.IsExported() {
+				continue
+			}
+			out.Field(i).Set(m.walkAssignable(rv.Field(i), f.Type, kind, depth+1))
+		}
+		return out.Interface()
+	case reflect.Ptr:
+		if rv.IsNil() {
+			return v
+		}
+		walked := m.walkReflect(rv.Elem().Interface(), kind, depth+1)
+		p := reflect.New(rv.Type().Elem())
+		if wv := reflect.ValueOf(walked); wv.IsValid() && wv.Type().AssignableTo(p.Elem().Type()) {
+			p.Elem().Set(wv)
+			return p.Interface()
+		}
+		return v
+	case reflect.Interface:
+		if rv.IsNil() {
+			return v
+		}
+		return m.walkReflect(rv.Elem().Interface(), kind, depth+1)
+	default:
 		return v
 	}
 }
 
+// walkAssignable 下探后回填到目标元素/字段类型（与 jsonredact.go 的
+// walkAssignable 同型）：掩码/回填叶子返回裸 string，命名 string 目标经
+// Convert 还型（type HostID string 的字段掩码后仍是 HostID）；nil 接口叶子
+// 取目标零值；理论不可达的类型失配兜底取原值（宁可不改，不让掩码链路 panic）。
+func (m *Masker) walkAssignable(val reflect.Value, dst reflect.Type, kind walkKind, depth int) reflect.Value {
+	var walked any
+	switch {
+	case val.Kind() == reflect.Interface && !val.IsNil():
+		walked = m.walkReflect(val.Elem().Interface(), kind, depth)
+	case val.Kind() != reflect.Interface:
+		walked = m.walkReflect(val.Interface(), kind, depth)
+	}
+	if walked == nil { // nil 接口叶子（接口形态的空值）
+		return reflect.Zero(dst)
+	}
+	wv := reflect.ValueOf(walked)
+	if wv.Type() == stringType && dst.Kind() == reflect.String && dst != stringType {
+		wv = wv.Convert(dst)
+	}
+	if wv.Type().AssignableTo(dst) {
+		return wv
+	}
+	return val
+}
+
 // maskStringLocked / restoreStringLocked 单值操作体（walk 持锁入口拆分）：
-// 逻辑与 Mask/Restore 同源（精确串长优先 + IPv4 动态注册 / 令牌回填）。
+// 逻辑与 Mask/Restore 同源（精确串长优先 + IPv6/IPv4 动态注册 / 令牌回填）。
 func (m *Masker) maskStringLocked(s string) string {
 	if s == "" {
 		return s
@@ -153,6 +337,28 @@ func (m *Masker) maskStringLocked(s string) string {
 	for _, origin := range origins {
 		s = strings.ReplaceAll(s, origin, m.origins[origin])
 	}
+	// IPv6 先于 IPv4（#100）：v4 映射/NAT64 形态（::ffff:10.0.0.5、
+	// 64:ff9b::192.0.2.33）是**一个** IPv6 字面量，先整段掩掉；若 IPv4 先行，
+	// 内嵌的 v4 段先被换成令牌，整段形态就被破坏、IPv6 判定无从做起了。
+	s = ipv6Re.ReplaceAllStringFunc(s, func(match string) string {
+		cand := match
+		prefix := ""
+		if !isIPv6CandByte(match[0]) {
+			prefix, cand = match[:1], match[1:] // 左边界字符（正则消耗掉的），回填
+		}
+		trailing := ""
+		if !isIPv6Literal(cand) {
+			// 句点紧跟地址（"gateway is ::1."）是 prose 常态：候选贪吃进
+			// 了句点导致 ParseIP 判负——剥尾点重验，剥得动且判过就掩地址、
+			// 保留句点；仍判不过就是非地址（时刻/MAC/作用域符），原样保留。
+			if t := strings.TrimRight(cand, "."); t != cand && isIPv6Literal(t) {
+				trailing, cand = cand[len(t):], t
+			} else {
+				return match
+			}
+		}
+		return prefix + m.maskLocked(cand) + trailing
+	})
 	return ipv4Re.ReplaceAllStringFunc(s, func(match string) string {
 		return m.maskLocked(match)
 	})
