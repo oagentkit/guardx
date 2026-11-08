@@ -2,6 +2,12 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.23.3] — 2026-11-08
+
+### 修复(wire,logredact,egressproxy)：审计五连修 #102/#101/#100/#99/#96
+
+Merge branch 'main' into fix/audit-issues-102-96
+
 ## [v0.23.2] — 2026-11-08
 
 - 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.37.4
