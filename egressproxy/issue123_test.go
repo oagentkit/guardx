@@ -2,6 +2,7 @@ package egressproxy_test
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -25,7 +26,7 @@ import (
 // 字面量返回**裸 v4 形态**的已检地址（与 DNS 路径的归一口径一致）。
 func TestMappedIPv6LiteralReturnsUnmappedAddr(t *testing.T) {
 	p := egressproxy.Policy{AllowHosts: []string{"::ffff:93.184.216.34"}}
-	addrs, err := p.PermitResolving(nil, "::ffff:93.184.216.34", 443)
+	addrs, err := p.PermitResolving(context.Background(), "::ffff:93.184.216.34", 443)
 	if err != nil {
 		t.Fatalf("逐字名单条目应放行，实得 %v", err)
 	}
@@ -44,7 +45,7 @@ func TestPlainIPv6AndIPv4LiteralUnaffected(t *testing.T) {
 	}
 	for _, tc := range cases {
 		p := egressproxy.Policy{AllowHosts: []string{tc.entry}}
-		addrs, err := p.PermitResolving(nil, tc.host, 443)
+		addrs, err := p.PermitResolving(context.Background(), tc.host, 443)
 		if err != nil {
 			t.Fatalf("%s 应放行，实得 %v", tc.host, err)
 		}
@@ -101,7 +102,11 @@ func TestConnectViaMappedIPv6LiteralEndToEnd(t *testing.T) {
 	if _, err := conn.Write([]byte("CONNECT " + hostport + " HTTP/1.1\r\nHost: " + hostport + "\r\n\r\n")); err != nil {
 		t.Fatalf("write connect: %v", err)
 	}
-	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	// 从 bufio.Reader 读响应与隧道数据而非裸 conn：代理把 200 响应与首批
+	// 隧道数据写进同一 TCP 段时（#99 的服务端形态），bufio 可能已缓冲超出
+	// 响应头的字节——裸 conn 读会把这些字节丢在缓冲区里读到空。
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
@@ -109,7 +114,7 @@ func TestConnectViaMappedIPv6LiteralEndToEnd(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("mapped 字面量已检地址不得被钉住复核拒掉（#123），实得 status=%d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(conn)
+	body, err := io.ReadAll(br)
 	if err != nil {
 		t.Fatalf("read tunneled data: %v", err)
 	}
