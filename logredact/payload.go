@@ -17,12 +17,25 @@ import (
 // 把「先裁剪、后脱敏」的顺序**焊在函数内部**，调用点没有犯错的余地。
 const payloadMarkerFormat = "<%d bytes scrubbed>"
 
-// payloadMarkerRe 识别「已经是标记」的值。
+// payloadMarkerTruncatedFormat 载荷字段以**截断形态**被裁剪时的标记格式。
+//
+// 什么时候会走到这一形态：日志落盘前的截断（按字节上限裁、按行切分多行
+// JSON、框架的 maxMessageLen）几乎必然把字符串字面量切在半途——值只有开头
+// 引号、没有闭合引号。此时裁的不是「完整载荷」，而是「载荷的残片」：
+// 原文在上游存在过、且**已被截断**这件事本身就是必须可审计的信号（越长的
+// 载荷越容易被截断，缺口方向正好落在最需要保护的一侧——guardx#120）。
+//
+// 与闭合形态的标记刻意**不同字**：告警侧靠这个后缀把「载荷被完整裁剪」与
+// 「载荷被截断后裁剪」区分开（后者往往意味着日志管道在上游丢过内容），
+// 用 HasTruncatedPayloadMarker 判定，别手写字符串匹配把信号写散。
+const payloadMarkerTruncatedFormat = "<%d bytes scrubbed, truncated>"
+
+// payloadMarkerRe 识别「已经是标记」的值（闭合形态与截断形态都算）。
 //
 // 幂等用：载荷可能被同一条脱敏链路处理不止一次（多道出口、日志重放）。
 // 若第二遍把标记本身又量了一遍，就会报出 "<21 bytes scrubbed>"——
 // 一个凭空捏造的长度，比不幂等更坏。
-var payloadMarkerRe = regexp.MustCompile(`^<\d+ bytes scrubbed>$`)
+var payloadMarkerRe = regexp.MustCompile(`^<\d+ bytes scrubbed(?:, truncated)?>$`)
 
 // RedactPayloads 把 fields 指定的载荷字段裁剪成「只记长度」的标记，再做形状脱敏。
 //
@@ -36,6 +49,10 @@ var payloadMarkerRe = regexp.MustCompile(`^<\d+ bytes scrubbed>$`)
 //
 // 裁剪只作用于**字符串形态**的字段值（载荷就是字符串：一段 base64、一份内容）。
 // 对象/数组形态的值本函数不动它（那是结构化入口 RedactPayloadValue 的射程）。
+//
+// 截断兜底（guardx#120）：文本被日志管道截断、字段值的字符串字面量没有
+// 闭合引号时，冒号后的剩余整段替换成**截断形态**标记（"<N bytes scrubbed,
+// truncated>"）——残片原文不落盘，截断本身是告警信号（HasTruncatedPayloadMarker）。
 //
 // 高频路径（日志热路径、每条 tool_call 都过一遍）用 NewPayloadRedactor，
 // 别每次重建正则。
@@ -113,33 +130,75 @@ func scrubPayloadText(s string, fields []string) string {
 }
 
 // scrubPayloadTextWith 用已编译好的字段正则裁剪载荷。
+//
+// 两种形态（guardx#120）：
+//   - **闭合**——值是完整的 JSON 字符串字面量，替换成「只记解码后长度」的
+//     标记，留下的仍是合法 JSON 字符串；
+//   - **截断**——日志管道把字面量切在半途（无闭合引号），把冒号后的剩余
+//     整段替换成「截断形态」标记。长度取剩余字节数即可：精度不重要，
+//     **不落原文**才是契约；截断本身是告警信号（见 payloadMarkerTruncatedFormat）。
 func scrubPayloadTextWith(s string, res []*regexp.Regexp) string {
 	for _, re := range res {
 		s = re.ReplaceAllStringFunc(s, func(m string) string {
 			g := re.FindStringSubmatch(m)
-			if len(g) < 3 {
+			if len(g) < 5 {
 				return m
 			}
-			// g[1] = 键与冒号（含原有空白），g[2] = 带引号的原值。
-			n, marker := jsonStringLen(g[2])
-			if marker {
-				return m // 已经是标记了 ⇒ 原样保留（幂等）
+			// 闭合形态：g[1] = 键与冒号（含原有空白），g[2] = 带引号的原值。
+			if g[2] != "" {
+				n, marker := jsonStringLen(g[2])
+				if marker {
+					return m // 已经是标记了 ⇒ 原样保留（幂等）
+				}
+				return g[1] + `"` + fmt.Sprintf(payloadMarkerFormat, n) + `"`
 			}
-			// 替换掉整个字符串字面量（含引号）——留下的仍是合法 JSON 字符串。
-			return g[1] + `"` + fmt.Sprintf(payloadMarkerFormat, n) + `"`
+			// 截断形态：g[3] = 键与冒号，g[4] = 开头引号 + 被切在半途的残片。
+			// json 解不出来（没有闭合引号），长度取字面字节数——宁可偏大，
+			// 也不把「有东西」报成「没有」。截断形态必然不是标记本身
+			// （标记总是写成闭合形态），无需再做幂等判断。
+			return g[3] + `"` + fmt.Sprintf(payloadMarkerTruncatedFormat, len(g[4])) + `"`
 		})
 	}
 	return s
 }
 
-// payloadFieldRe 匹配「"字段名": "字符串值"」形态。
+// payloadTruncatedMarkerRe 在整段文本里定位截断形态标记（非锚定——
+// 标记是日志行的一部分，不是整行）。
+var payloadTruncatedMarkerRe = regexp.MustCompile(`<\d+ bytes scrubbed, truncated>`)
+
+// HasTruncatedPayloadMarker 报告 s 是否含「截断形态载荷」的裁剪标记——
+// 即日志管道在脱敏**之前**就把载荷字段切断了。
 //
-// 值那一段按 JSON 字符串字面量匹配（处理转义），键名按**字面量**匹配
+// 这是 guardx#120 修法里的告警信号出口：截断形态的标记与闭合形态**不同字**
+// （"<N bytes scrubbed, truncated>"），本函数把它收成单一判定点，告警侧
+// （审计扫描、落盘前检查）用它，别各处手写字符串匹配把信号写散。
+//
+// 注意语义边界：本函数判定的是「文本里有没有截断标记」，前提是文本已经
+// 过本包的载荷裁剪；对未脱敏的原文它恒返回 false——先裁剪、后探测。
+func HasTruncatedPayloadMarker(s string) bool {
+	return payloadTruncatedMarkerRe.MatchString(s)
+}
+
+// payloadFieldRe 匹配「"字段名": "字符串值"」形态——闭合与截断两种形态
+// 各一个分支（guardx#120）：
+//
+//	("字段名"\s*:\s*)("(?:[^"\\]|\\.)*")        闭合：完整 JSON 字符串字面量
+//	("字段名"\s*:\s*)("(?:[^"\\]|\\.)*\\?$)    截断：开头引号 + 到文本末尾都没有闭合引号
+//
+// 截断分支是日志落盘前截断（按字节上限裁、按行切分多行 JSON、框架的
+// maxMessageLen）的兜底：没有它，被切在半途的字面量零命中——既不打码也
+// 不告警，残片原文全量落盘。末尾的 `\\?` 兜住「恰好切在反斜杠后」的形态
+// （孤立反斜杠构不成转义对，但同样是原文残片）。键名按**字面量**匹配
 // （QuoteMeta）——字段名不是正则，调用方给的什么就是什么。
+//
+// 分支顺序：闭合在前。闭合值能被第一分支完整吃掉（贪婪但止于闭合引号）；
+// 只有到文本末尾都没有闭合引号的残片才轮得到第二分支。两个分支的捕获组
+// 各自独立（g[1]/g[2] 闭合，g[3]/g[4] 截断），scrubPayloadTextWith 据此分派。
 //
 // 只匹配字符串值：载荷是字符串形态；对象/数组形态的载荷由结构化入口处理。
 func payloadFieldRe(field string) *regexp.Regexp {
-	return regexp.MustCompile(`("` + regexp.QuoteMeta(field) + `"\s*:\s*)("(?:[^"\\]|\\.)*")`)
+	k := regexp.QuoteMeta(field)
+	return regexp.MustCompile(`("` + k + `"\s*:\s*)("(?:[^"\\]|\\.)*")|("` + k + `"\s*:\s*)("(?:[^"\\]|\\.)*\\?$)`)
 }
 
 // jsonStringLen 取 JSON 字符串字面量的**解码后**字节长度。

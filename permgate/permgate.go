@@ -111,7 +111,8 @@ type Rule struct {
 	// "git status:*" 前缀（空白边界，命令形态专用）；含 * 通配；否则精确等值。
 	// ⚠ 路径规则用 wildcard 形态（"/repo/data/*"）而非前缀形态——前缀边界是
 	// 空白/制表符，对路径子树形同虚设；路径 subject 匹配前会 filepath.Clean
-	//（`..` 穿越不命中），符号链接围栏归执行器。
+	//（`..` 穿越不命中），符号链接围栏归执行器——单源见 sandbox.FSFence
+	//（文本严格档 + EvalSymlinks 落地 + cwd 语义，guardx#117）。
 	Content string
 }
 
@@ -488,7 +489,8 @@ func structuredInput(input any) bool {
 // （"/repo/data/*"）可被 `..` 穿越与重复分隔符绕过，Clean 后
 // "/repo/data/../../etc/passwd" 归一为 "/etc/passwd"，不再误命中（fail-closed；
 // 第六轮审计）。符号链接绕过须执行器侧 EvalSymlinks 治理——本包不做文件系统
-// 访问，保持纯函数判定。command 字段按复合命令拆段（#62），其余字段单段。
+// 访问，保持纯函数判定；该治理的单源见 sandbox.FSFence（guardx#117）。
+// command 字段按复合命令拆段（#62），其余字段单段。
 var defaultSubjectKeys = []string{"command", "url", "file_path", "path", "pattern", "patch_text"}
 
 // pathSubjectKeys 匹配前须 Clean 的路径类字段。

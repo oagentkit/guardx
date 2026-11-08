@@ -48,13 +48,43 @@ github.com/oagentkit/guardx → fence injectband logredact egress egressproxy pe
 | `fence` | ~284 | **提示注入卫生（数据侧）**：把不可信内容圈进显式数据区，并中和内容中伪造的围栏标记，防其越出数据区取指令待遇 |
 | `injectband` | ~121 | **提示注入卫生（系统侧）**：给系统带外注入打来源标记，并转义 body 内伪造的同形标签，防身份伪造 |
 | `toolfail` | ~1000 | **工具失败的分类契约**：类别 → 可重试性/退避/需人工/重发安全/面向模型的处置指引。**重发安全与重试价值是两个正交维度**——超时值得重试但服务端可能已执行，原样重发即重复施加副作用 |
-| `sandbox` | ~800 | **执行沙箱的档位语义与后端协议**：`Level`（none/process/os/machine，序即强弱）+ `Provider` + `Registry`。**选不到满足档位的后端即拒绝，绝不降级**。预算面 `Budget`（墙钟/调用数/字节/**内存**）+ 可选能力面 `Capable`（后端自报兑现哪几项；**不实现即只兑现三闸、不兑现内存**）——档位管能力面、支持面管资源兜底，两维**正交**。出站面 `EgressMode`（unrestricted/proxy/denied，序即强弱）+ 可选声明 `EgressEnforcer`——**词表必须在 tier 0 这一层**：接口一致性要求返回值类型同一，词表若在下游，上游后端「能兑现」这条路会被类型系统堵死且毫无声响 |
+| `sandbox` | ~800 | **执行沙箱的档位语义与后端协议**：`Level`（none/process/os/machine，序即强弱）+ `Provider` + `Registry`。**选不到满足档位的后端即拒绝，绝不降级**。预算面 `Budget`（墙钟/调用数/字节/**内存**）+ 可选能力面 `Capable`（后端自报兑现哪几项；**不实现即只兑现三闸、不兑现内存**）——档位管能力面、支持面管资源兜底，两维**正交**。出站面 `EgressMode`（unrestricted/proxy/denied，序即强弱）+ 可选声明 `EgressEnforcer`——**词表必须在 tier 0 这一层**：接口一致性要求返回值类型同一，词表若在下游，上游后端「能兑现」这条路会被类型系统堵死且毫无声响。路径域原语 `FSFence`（文件系统围栏）：root 内包含 + 符号链接落地 + cwd 语义，执行器侧路径围栏的单源（permgate 判「要不要放行」，FSFence 判「路径落在哪里」） |
 | `wire` | ~1100 | **跨进程调用协议**（`github.com/oagentkit/guardx/wire`）：帧格式（4B 大端长度 + JSON 负载，不用行分隔——工具输出可能含换行）。**两条通道 × 四个角色**：启动通道（父 `Starter` ↔ 子 `Runner`，一次执行 1 个 Start + 1 个 Result）、调用通道（父 `Server` ↔ 子 `Client`，N 次工具调用）——**两条必须是两条连接**（共用一条则「这帧是 Start 还是 Response」只能靠猜，而两者 JSON 形状不同，猜错就是「字段读成了另一个意思」）。**失败分类跨进程同源**（取 `toolfail` 的分类，不退化成自由字符串）；**预算的权威在父侧**（子进程自己记账可以谎报）；**在途调用有硬上限**（超出即回「超限」，不排队等）；**取消传播靠管道关闭**（最强的取消信号）|
 
 > 「行数」口径 = 生产代码 + 测试代码总和。
 >
 > `bashguard`（Shell 命令静态裁决）已迁至 `github.com/oagentkit/tools/bashguard`，
 > `audit`（审计留痕）已迁至 `github.com/oagentkit/obs/audit`。
+
+## 出站防护选型：guardx/egress vs oekit/pkg/urlguard
+
+出站 SSRF 判定在生态里有**两套**实现：本仓 `egress`（+ `egressproxy`）与
+[`oekit/pkg/urlguard`](https://github.com/oekit/pkg)。两套共享同一份禁止段
+口径（私网/回环/链路本地（含云元数据）/CGNAT/special-use IPv6/exotic IPv4
+字面量），等价性由 `egress/urlguard_equiv_test.go` 的语料测试钉住——任一侧
+段表漂移，CI 即红（#118：判定表不双维护的守门）。
+
+**选型一句话**：目标由 **LLM 决定** → `egress`（解析层判定 + 已检地址钉住 +
+重定向守卫是那套没有的组合）；URL 由**管理员配置**（自配 webhook 出站）→
+`urlguard`（精确 host 钉版与自定义策略钩子是这套没有的入口）；**子进程/原生
+工具的流量** → `egressproxy`（本地代理，另议）。
+
+| 能力 | `oekit/pkg/urlguard` | `guardx/egress` | `guardx/egressproxy` |
+|---|---|---|---|
+| URL 字面量校验（scheme 白名单 + host） | `CheckURL` / `IsBlockedURL` | `Check` / `CheckWith` | —（只判 host:port） |
+| host 字面量校验 | `CheckHost` | `CheckHost` / `CheckHostWith` | `Permit`（名单判定） |
+| 解析后判定（DNS 围栏 / rebinding） | 内建于拨号层（`DialFunc` 解析每个 IP） | `CheckResolving` / `CheckHostResolving`（`Resolver` 可注入，返回**已检地址**供拨号钉住） | `PermitResolving` |
+| 拨号层守卫 | `DialFunc` / `SafeDialFunc`（端点复核闭合 TOCTOU） | `Policy.NewClient` / `MustClient`（拨号层 + **重定向**双重守卫） | 本地代理转发（只监听回环） |
+| 重定向守卫 | 无（调用方自理） | `NewClient` 内建 | — |
+| 精确 host 钉版 | `WithExactHosts`（host:port authority 逐字） | 无 | `Policy.AllowHosts`（精确 + 通配，非 authority 钉版） |
+| 放行面表达 | 构造期豁免（`WithAllowPrivate` / `WithAllowCIDRs` / `WithAllowDomains`）+ 自定义策略钩子（`WithCheckIPFunc` / `WithCheckHostFunc`） | `Policy` 值（`AllowPrivate` / `AllowLoopback`）+ 具名组合（`PublicOnly` / `PrivateNoLoopback` / `SelfService`） | 白/黑名单 + 端口 + `Limited` 只读档 |
+| exotic IPv4 字面量（`0177.0.0.1` 等） | 拒（无条件，豁免不覆盖） | 拒（同口径） | 经 `egress` 同一套 |
+| 非 ASCII host（`127。0。0。1`、IDN） | 确定性折叠后判；折叠不掉 fail-closed 拒 | 字面量层放行（域名口径；解析层 fail-closed 兜底） | 同 `egress` |
+| 约定域名后缀 | `localhost` / `.internal` / `.local` / `.localdomain` | 仅 localhost 域（字面量层） | 无（名单制） |
+
+已知差异（语义刻意不同，非段表漂移，语料测试逐条钉住）：约定后缀与非 ASCII
+host 的字面量层结论不同——`egress` 对域名**不解析**是其明示边界（解析层
+`CheckResolving` / `DialFunc` 兜底），选型时按「谁来解析」对号入座。
 
 ## 提示注入的两个方向
 
