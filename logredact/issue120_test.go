@@ -128,8 +128,8 @@ func TestTruncatedAndClosedCoexist(t *testing.T) {
 // TestTruncatedSurvivesBuiltinRules 截断标记必须活着穿过内建形状规则
 // （RedactPayloads 的三段顺序：载荷裁剪 → 内建规则 → 扩展规则）。
 func TestTruncatedSurvivesBuiltinRules(t *testing.T) {
-	in := `{"content":"sk-ant-" + string` // 残片内含形状规则会命中的前缀
-	in = `{"content":"sk-ant-` + strings.Repeat("A", 29)
+	// 残片内含形状规则会命中的前缀（vendor-token 规则）。
+	in := `{"content":"sk-ant-` + strings.Repeat("A", 29)
 	got := RedactPayloads(in, "content")
 	if !strings.Contains(got, "bytes scrubbed, truncated>") {
 		t.Fatalf("截断标记应穿过形状规则原样保留，实得 %s", got)
