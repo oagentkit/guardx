@@ -24,11 +24,18 @@ type Masker struct {
 	next    int
 	tokens  map[string]string // token → 原文
 	origins map[string]string // 原文 → token（注册去重）
+	// secrets 调用方经 AddSecret **显式**注册的原文（#122）：精确盲替换阶段
+	// 只处理这批。动态注册（IP 模式命中时 maskLocked 记账）的原文**不**进
+	// 精确阶段——它们下次出现仍由 IP 模式整段掩掉（同令牌），若进精确阶段
+	// 的盲替换（strings.ReplaceAll 无边界判定），先见短 IP 后见以其为中部
+	// 子串的长 IP 时会把长 IP 掩成「残段+旧令牌」，破坏「同址恒同令牌」
+	// （guardx#100 自述不变量）与掩码形态（guardx#122）。
+	secrets map[string]bool
 }
 
 // NewMasker 构造（零值不可用，一律经本构造）。
 func NewMasker() *Masker {
-	return &Masker{tokens: map[string]string{}, origins: map[string]string{}}
+	return &Masker{tokens: map[string]string{}, origins: map[string]string{}, secrets: map[string]bool{}}
 }
 
 // ipv4Re 低敏感默认模式：IPv4 地址（工具输出里最常见的拓扑标识）。
@@ -84,12 +91,18 @@ func isIPv6Literal(cand string) bool {
 var tokenRe = regexp.MustCompile(`«T([0-9]+)»`)
 
 // AddSecret 注册精确串（会话主机名、实例名等调用方已知标识），返回其令牌。空串忽略。
+//
+// 显式注册的串**全串盲替换**（无边界判定——调用方声明了「这个串就是凭据/
+// 标识本体」，出现在任何上下文里都该被掩；长短串冲突由注册后的长度优先序
+// 化解，与 logredact.RedactSecrets 同款取舍）。与动态注册（IP 模式命中）
+// 的差别见 Masker.secrets：显式串参与后续精确替换，动态 IP 不参与（#122）。
 func (m *Masker) AddSecret(v string) string {
 	if v == "" {
 		return ""
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.secrets[v] = true
 	return m.maskLocked(v)
 }
 
@@ -105,9 +118,10 @@ func (m *Masker) maskLocked(v string) string {
 	return tok
 }
 
-// Mask 掩码文本：先精确注册串，再 IPv6 / IPv4 模式（动态注册，同址恒同
-// 令牌）。结构化数据的双视图入口见 MaskValue（逐字符串值 walk，无序列化
-// 往返）。
+// Mask 掩码文本：先精确替换显式注册串（AddSecret），再 IPv6 / IPv4 模式
+// （动态注册，同址恒同令牌——且该不变量跨调用成立：早前掩过的 IP 再次出现
+// 仍得同令牌，无论其后是否出现过以它为子串的更长 IP，guardx#122）。
+// 结构化数据的双视图入口见 MaskValue（逐字符串值 walk，无序列化往返）。
 func (m *Masker) Mask(s string) string {
 	if s == "" {
 		return s
@@ -323,12 +337,19 @@ func (m *Masker) walkAssignable(val reflect.Value, dst reflect.Type, kind walkKi
 
 // maskStringLocked / restoreStringLocked 单值操作体（walk 持锁入口拆分）：
 // 逻辑与 Mask/Restore 同源（精确串长优先 + IPv6/IPv4 动态注册 / 令牌回填）。
+//
+// 精确阶段只处理 AddSecret 显式串（#122）：动态注册的 IP 原文不再做盲替换
+// ——它们再次出现时由下方 IP 模式重新整段命中（maskLocked 去重 ⇒ 同址恒同
+// 令牌跨调用成立）。此前对全部 origins 盲替换的缺陷：先 Mask 短 IP（动态
+// 注册）再 Mask 以它为中部子串的长 IP（11.2.3.4 含 1.2.3.4），长 IP 被换成
+// 「1«Tn»」残段——既非原址形态、令牌外残留原文，还污染下游按 «Tn» 形态
+// 消费令牌的 Count/UnmaskValue/报告渲染。
 func (m *Masker) maskStringLocked(s string) string {
 	if s == "" {
 		return s
 	}
-	origins := make([]string, 0, len(m.origins))
-	for origin := range m.origins {
+	origins := make([]string, 0, len(m.secrets))
+	for origin := range m.secrets {
 		if origin != "" {
 			origins = append(origins, origin)
 		}

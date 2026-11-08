@@ -183,21 +183,28 @@ var builtinRules = []Rule{
 		//（无收尾引号）时，闭引号规则全部失配 ⇒ 整值原文泄漏。掩码保留开
 		// 引号（`"****`）——掩值不改引号的有无，下游「值以引号收尾」的模式
 		// 仍可匹配。闭引号形态存在时本规则不命中（[^"\n]* 跨不过闭引号）。
+		// ⚠️ 锚点必须 (?m)$（guardx#121）：截断不只发生在整段载荷末尾——
+		// shipper 按行截断（Loki/Fluentd 行上限、head -c、终端裁剪）后后面
+		// 还有行是常态，裸 $ 只认整段末尾，逐行截断形态整值原文泄漏。(?m) 下
+		// $ 认行尾；[^"\n]* 本就不跨行，值匹配仍被锁在单行内，语义自洽。
+		// 幂等不受影响：已掩行尾 `"****` 二次命中替换为自身。
 		Name: "key-value-double-quoted-truncated",
-		Re:   regexp.MustCompile(`(?i)\b(key)` + kvSeparator + `("[^"\n]*$)`),
+		Re:   regexp.MustCompile(`(?im)\b(key)` + kvSeparator + `("[^"\n]*$)`),
 		Repl: `$1$2"****`,
 	},
 	{
 		Name: "key-value-single-quoted-truncated",
-		Re:   regexp.MustCompile(`(?i)\b(key)` + kvSeparator + `('[^'\n]*$)`),
+		Re:   regexp.MustCompile(`(?im)\b(key)` + kvSeparator + `('[^'\n]*$)`),
 		Repl: `$1$2'****`,
 	},
 	{
 		// 整值掩（oagentkit/guardx#51）：凭证值本身是 JSON 数组/对象时，裸值
 		// 规则只吃到首个空白/引号（`****"a","b"]` 半截对象）；单层括号平衡
-		// 形态（含截断兜底）整值换掉——按字段名整值替换语义。
+		// 形态（含截断兜底）整值换掉——按字段名整值替换语义。截断兜底的
+		// 锚点用 (?m)$（guardx#121，理由同 key-value-*-truncated：逐行截断
+		// 后面还有行是常态，裸 $ 只认整段末尾）。
 		Name: "key-value-bracket",
-		Re:   regexp.MustCompile(`(?i)\b(key)` + kvSeparator + `(\[[^\]\n]*\]|\{[^\}\n]*\}|\[[^\]\n]*$|\{[^\}\n]*$)`),
+		Re:   regexp.MustCompile(`(?im)\b(key)` + kvSeparator + `(\[[^\]\n]*\]|\{[^\}\n]*\}|\[[^\]\n]*$|\{[^\}\n]*$)`),
 		Repl: `$1$2****`,
 	},
 	{
@@ -220,19 +227,19 @@ var builtinRules = []Rule{
 	},
 	{
 		// 截断/括号整值兜底：语义同 key-value 组的同名规则（#50/#51），键面
-		// 换凭证词表。
+		// 换凭证词表。截断兜底锚点 (?m)$（guardx#121，理由同上）。
 		Name: "credential-kv-double-quoted-truncated",
-		Re:   regexp.MustCompile(`(?i)` + credentialKeyPart + kvSeparator + `("[^"\n]*$)`),
+		Re:   regexp.MustCompile(`(?im)` + credentialKeyPart + kvSeparator + `("[^"\n]*$)`),
 		Repl: `$1$2"****`,
 	},
 	{
 		Name: "credential-kv-single-quoted-truncated",
-		Re:   regexp.MustCompile(`(?i)` + credentialKeyPart + kvSeparator + `('[^'\n]*$)`),
+		Re:   regexp.MustCompile(`(?im)` + credentialKeyPart + kvSeparator + `('[^'\n]*$)`),
 		Repl: `$1$2'****`,
 	},
 	{
 		Name: "credential-kv-bracket",
-		Re:   regexp.MustCompile(`(?i)` + credentialKeyPart + kvSeparator + `(\[[^\]\n]*\]|\{[^\}\n]*\}|\[[^\]\n]*$|\{[^\}\n]*$)`),
+		Re:   regexp.MustCompile(`(?im)` + credentialKeyPart + kvSeparator + `(\[[^\]\n]*\]|\{[^\}\n]*\}|\[[^\]\n]*$|\{[^\}\n]*$)`),
 		Repl: `$1$2****`,
 	},
 	{
