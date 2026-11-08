@@ -64,7 +64,8 @@ func (rn *Runner) closeConn() {
 //
 // ctx 到期或取消时**必然返回**（#79）：主动关底层连接（可关时）解除阻塞读，
 // 返回包装了 ctx.Err() 的错误，不再无期等父侧。底层不实现 io.Closer 时
-// ctx 路径仍会返回，但阻塞中的读 goroutine 要等连接自然断开才退出。
+// ctx 路径仍会返回（#102：此刻不等读 goroutine 退出——等不到，goroutine
+// 要等连接自然断开才退出），但阻塞中的读 goroutine 要等连接自然断开才退出。
 func (rn *Runner) AwaitStart(ctx context.Context) (*Start, error) {
 	type outcome struct {
 		start *Start
@@ -93,7 +94,13 @@ func (rn *Runner) AwaitStart(ctx context.Context) (*Start, error) {
 	case <-ctx.Done():
 		// 父侧不下发：关连接解除阻塞读，本侧自我了断（#79）。
 		rn.closeConn()
-		<-done // 等读 goroutine 退出（close 后必返回），不泄漏。
+		if rn.closer != nil {
+			<-done // 可关连接：close 已解除阻塞中的读，等 goroutine 退出，不泄漏。
+		}
+		// #102：closer == nil 时阻塞中的读解除不了——等读 goroutine 退出
+		// 等于等连接自然断开，会把 godoc 承诺「必然返回」的 ctx 路径重新
+		// 挂死。直接返回，goroutine 留守至连接自然断开（类型 godoc 已写明
+		// 的既有限制）。done 有缓冲，goroutine 最终退出时不会阻塞在发送上。
 		return nil, fmt.Errorf("wire: 等待启动帧时 ctx 到期（父侧未下发）: %w", ctx.Err())
 	}
 }

@@ -24,12 +24,24 @@
 package egressproxy
 
 import (
+	"context"
+	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/oagentkit/guardx/egress"
 	"github.com/oekit/pkg/errors"
 )
+
+// Resolver 域名解析的最小接口（guardx#96 DNS 围栏的注入点）：*net.Resolver
+// 天然满足，测试与特殊网络环境注入 stub 也只需要实现这一个方法。
+// （与 egress.Resolver 同形——本包的解析围栏复用 egress.CheckHostResolving，
+// 两个接口结构等价，同一个值两边都能传。）
+type Resolver interface {
+	LookupIP(ctx context.Context, network, host string) ([]net.IP, error)
+}
 
 // Policy 代理的放行面。
 //
@@ -44,6 +56,13 @@ type Policy struct {
 	// 也**不**命中 `evilexample.com`（后缀按标签边界比，不做裸后缀比较）。
 	// 单独一个 "*" 表示放行全部主机（此时 `DenyHosts` 仍然优先）——
 	// 这是「只做黑名单」的唯一写法，必须显式写出来。
+	//
+	// ⚠️ 对**域名**条目（guardx#96）：命中名单只是第一道闸——本放行面
+	// 缺省会解析 DNS，并把**全部解析结果**逐个过 IP 围栏（私网/链路本地/
+	// 云元数据等一律拒绝，解析失败/空结果 fail-closed）。组织 DNS（或被
+	// 劫持的内网 DNS）把名单里的域名解析到内网的借道形态由此被挡住。
+	// IP 字面量条目（如 "127.0.0.1"）不受此围栏管：写进名单本身就是
+	// 调用方对这个地址的显式意图。
 	AllowHosts []string
 	// DenyHosts 拒绝的目标主机（语义同 AllowHosts，**优先于** AllowHosts）。
 	DenyHosts []string
@@ -58,6 +77,16 @@ type Policy struct {
 	// 方法不可见。所以 Limited 对 HTTPS 只保证「目标主机在名单内」，
 	// 不保证「只读」——这是能力的真实边界，写在这里而不是留给使用者猜。
 	Limited bool
+	// Resolver 域名解析器（guardx#96 DNS 围栏）。nil = net.DefaultResolver。
+	// 测试与特殊网络环境（内部 DNS、hosts 覆盖）从这里注入。
+	Resolver Resolver
+	// SkipDNSCheck 显式关闭 DNS 围栏（guardx#96）：只按主机名判定，
+	// 不解析、返回零地址（调用方按主机名拨号）。
+	//
+	// ⚠️ 这是对「解析到内网的域名照转」**解防**的显式开关——只该在宿主
+	// 明确接受「域名=零 DNS 防护」的轻量档使用（与 egress 包对裸 CheckHost
+	// 的警示同一口径）。缺省必须是解析 + fail-closed。
+	SkipDNSCheck bool
 }
 
 // BlockedError 准入拒绝（结构化：调用方按需呈现原因与目标）。
@@ -115,24 +144,90 @@ func validateHostPattern(h string) error {
 }
 
 // Permit 判一个目标是否放行。拒绝一律返回 *BlockedError。
+//
+// ⚠️ 域名目标（guardx#96）：命中名单后还会**解析 DNS** 并把全部解析结果
+// 逐个过 IP 围栏（缺省 fail-closed）——只判主机名字符串的旧形态正是
+// egress#60 同款洞在代理层的复现。需要已检地址做拨号钉住的调用方请用
+// PermitResolving；本方法是其丢弃地址的便捷形态。
 func (p Policy) Permit(host string, port int) error {
+	_, err := p.PermitResolving(context.Background(), host, port)
+	return err
+}
+
+// PermitResolving 判一个目标是否放行，并返回**已过检的地址集合**。
+// 拒绝一律返回 *BlockedError。
+//
+// # 判定顺序
+//
+//  1. 名单判定（与既有口径一致）：空主机 / 命中拒绝名单 / 放行名单为空 /
+//     不在放行名单内 / 端口未放行——先于一切 DNS 查询，未过的目标不触发
+//     解析（fail-fast，也不给任意域名当解析器用）；
+//  2. DNS 围栏（guardx#96）：域名 host 经 Resolver（nil 时
+//     net.DefaultResolver）解析，**全部解析结果**逐个过与 egress 同一套
+//     IP 围栏（egress.Policy 零值：私网/回环/链路本地（含云元数据）/CGNAT/
+//     组播/保留段一律拒绝，只放公网）；解析失败、解析结果为空、解析出
+//     判定不了的地址都 fail-closed。exotic IPv4 词法形态（127.1 /
+//     0x7f000001——inet_aton 语义会被 cgo resolver 解析成回环）在词法层
+//     直接拒绝；
+//  3. IP 字面量 host（netip 可解析的）：名单判定即显式意图，返回该地址
+//     本身，不触发解析。
+//
+// # 返回值与 TOCTOU
+//
+// 返回的地址集合是**已全部过检**的：调用方（本包代理的两条转发路径）拨号
+// 时钉住其中之一（字面量直连，不再二次解析），才能闭合「检查后换解析」
+// 的 TOCTOU——egress#60 修复说明明确了「返回全部已检地址供拨号钉住是闭合
+// check/use 间 TOCTOU 的前提」，CONNECT 隧道（长连接，TOCTOU 窗口更大）
+// 尤其需要钉住。SkipDNSCheck 为 true 时返回 (nil, nil)：无已检地址，调用方
+// 按主机名拨号。
+func (p Policy) PermitResolving(ctx context.Context, host string, port int) ([]netip.Addr, error) {
 	h := normalizeHost(host)
 	if h == "" {
-		return &BlockedError{Host: host, Port: port, Reason: "目标主机为空"}
+		return nil, &BlockedError{Host: host, Port: port, Reason: "目标主机为空"}
 	}
 	if matchAny(p.DenyHosts, h) {
-		return &BlockedError{Host: h, Port: port, Reason: "命中拒绝名单"}
+		return nil, &BlockedError{Host: h, Port: port, Reason: "命中拒绝名单"}
 	}
 	if len(p.AllowHosts) == 0 {
-		return &BlockedError{Host: h, Port: port, Reason: "放行名单为空（默认拒绝）"}
+		return nil, &BlockedError{Host: h, Port: port, Reason: "放行名单为空（默认拒绝）"}
 	}
 	if !matchAny(p.AllowHosts, h) {
-		return &BlockedError{Host: h, Port: port, Reason: "不在放行名单内"}
+		return nil, &BlockedError{Host: h, Port: port, Reason: "不在放行名单内"}
 	}
 	if !p.portAllowed(port) {
-		return &BlockedError{Host: h, Port: port, Reason: "端口不在放行端口内"}
+		return nil, &BlockedError{Host: h, Port: port, Reason: "端口不在放行端口内"}
 	}
-	return nil
+	// IP 字面量：名单命中即调用方的显式意图（写进名单的就是这个地址），
+	// 返回自身供拨号钉住，不走解析。
+	if addr, err := netip.ParseAddr(h); err == nil {
+		return []netip.Addr{addr}, nil
+	}
+	if p.SkipDNSCheck {
+		return nil, nil
+	}
+	// DNS 围栏（guardx#96）：复用 egress.CheckHostResolving——同仓两个包对
+	// 「域名→IP」这一步的治理必须同一套，egress.Policy 零值 = 只放公网
+	// （代理的威胁主体是宿主子进程，借道名单摸内网/云元数据正是要挡的）。
+	addrs, err := egress.CheckHostResolving(ctx, h, egress.Policy{}, p.resolver())
+	if err != nil {
+		return nil, &BlockedError{Host: h, Port: port, Reason: "DNS 围栏（解析结果须全过 IP 策略，fail-closed）: " + err.Error()}
+	}
+	// 归一 v4-in-v6 载体（net.ParseIP 对 v4 一律给 16 字节）：钉住的字面量
+	// 用裸 v4 形态拨号（93.184.216.34），不是 ::ffff: 前缀形态——同一地址，
+	// 拨号面干净。
+	for i := range addrs {
+		addrs[i] = addrs[i].Unmap()
+	}
+	return addrs, nil
+}
+
+// resolver 取注入的解析器；nil 交由 egress.CheckHostResolving 落到
+// net.DefaultResolver。
+func (p Policy) resolver() egress.Resolver {
+	if p.Resolver == nil {
+		return nil
+	}
+	return p.Resolver
 }
 
 func (p Policy) portAllowed(port int) bool {
@@ -181,7 +276,7 @@ func matchAny(patterns []string, host string) bool {
 	return false
 }
 
-// net_JoinHostPort 只在本文件用一次（避免为一行拼装引 net 包的其余名字）。
+// net_JoinHostPort 错误消息里的 host:port 拼装（IPv6 host 带回括号）。
 func net_JoinHostPort(host string, port int) string {
-	return host + ":" + strconv.Itoa(port)
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }
