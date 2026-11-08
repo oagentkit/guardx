@@ -216,9 +216,15 @@ func (p Policy) PermitResolving(ctx context.Context, host string, port int) ([]n
 	// 「没写任何地址」，落到 IP 围栏——169.254.169.254 / 127.0.0.1 一类
 	// 在黑名单模式下不放行。这一步在 SkipDNSCheck 之前：字面量判定不是
 	// DNS 判定，不被「跳过解析」豁免。
+	// 返回前 Unmap()（guardx#123）：IPv4-mapped IPv6 字面量（::ffff:x.x.x.x）
+	// 的 netip 形态 Is4In6，String() 仍是 ::ffff: 前缀形态——而拨号面
+	// pinnedDial 的 Control 复核按 Unmap().String() 比对（net 栈 Control 收到
+	// 的也是点分 v4 形态）。不归一的话集合建在 mapped 形态、比对在裸 v4
+	// 形态，两侧恒不相等 ⇒ 已检地址 100% 被自己的钉住复核拒掉（合法配置
+	// 自我失能）。非 mapped 地址 Unmap 是恒等，纯 v6/v4 字面量不受影响。
 	if addr, err := netip.ParseAddr(h); err == nil {
 		if matchExact(p.AllowHosts, h) {
-			return []netip.Addr{addr}, nil
+			return []netip.Addr{addr.Unmap()}, nil
 		}
 		addrs, err := egress.CheckHostResolving(ctx, h, egress.Policy{}, p.resolver())
 		if err != nil {

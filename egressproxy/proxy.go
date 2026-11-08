@@ -235,10 +235,16 @@ func (p *Proxy) dialTarget(ctx context.Context, host string, addrs []netip.Addr,
 // pinnedDial 逐个已检地址字面量直连（guardx#96 拨号钉住）——不再二次解析，
 // 闭合「检查后换解析」的 TOCTOU；并挂 Control 复核实际拨号地址必须属于
 // 已检集合（纵深：哪怕拨号路径将来多出回退分支，逃不出这份集合）。
+//
+// 集合键、拨号字面量、Control 比对三方统一 Unmap().String()（guardx#123）：
+// Control 从 net 栈收到的是点分 v4 形态（v4 地址没有 mapped 形态），集合键
+// 若建在 ::ffff: 前缀形态上则恒不相等——钉住复核把合法已检地址全拒。生产侧
+// （PermitResolving）已归一，这里再归一是纵深：任何将来多出的地址来源都不
+// 能靠形态差异逃过或误触复核。
 func pinnedDial(d *net.Dialer, ctx context.Context, addrs []netip.Addr, port int) (net.Conn, error) {
 	allowed := make(map[string]struct{}, len(addrs))
 	for _, a := range addrs {
-		allowed[a.String()] = struct{}{}
+		allowed[a.Unmap().String()] = struct{}{}
 	}
 	pin := *d
 	pin.Control = func(network, address string, _ syscall.RawConn) error {
@@ -257,7 +263,7 @@ func pinnedDial(d *net.Dialer, ctx context.Context, addrs []netip.Addr, port int
 	}
 	var lastErr error
 	for _, a := range addrs {
-		c, err := pin.DialContext(ctx, "tcp", net.JoinHostPort(a.String(), strconv.Itoa(port)))
+		c, err := pin.DialContext(ctx, "tcp", net.JoinHostPort(a.Unmap().String(), strconv.Itoa(port)))
 		if err == nil {
 			return c, nil
 		}
