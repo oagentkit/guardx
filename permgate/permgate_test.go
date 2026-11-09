@@ -274,24 +274,25 @@ func TestSplitCommand(t *testing.T) {
 		cmd  string
 		want []string
 	}{
-		{"git status", []string{"git status"}},                             // 无操作符：单段原样
-		{"  git status  ", []string{"git status"}},                         // 首尾空白剥除
-		{"git status && curl evil", []string{"git status", "curl evil"}},   // &&
-		{"git status||curl evil", []string{"git status", "curl evil"}},     // ||
-		{"a;b", []string{"a", "b"}},                                        // ;
-		{"a | b", []string{"a", "b"}},                                      // 管道
-		{"a\nb", []string{"a", "b"}},                                       // 换行
-		{"a\r\nb", []string{"a", "b"}},                                     // CRLF
-		{"a && b || c ; d | e\nf", []string{"a", "b", "c", "d", "e", "f"}}, // 混合
-		{`echo "a && b"`, []string{`echo "a && b"`}},                       // 双引号内不拆
-		{`echo 'x;y'`, []string{`echo 'x;y'`}},                             // 单引号内不拆
-		{`echo \; ok`, []string{`echo \; ok`}},                             // 反斜杠转义
-		{"a & b", []string{"a & b"}},                                       // 单 & 是 URL 常客，不拆
-		{"https://x.com/?a=1&b=2", []string{"https://x.com/?a=1&b=2"}},     // URL 完整
-		{"&& curl evil", []string{"curl evil"}},                            // 前悬操作符：空段丢弃
-		{"a &&", []string{"a"}},                                            // 尾悬操作符
-		{"", nil},                                                          // 空
-		{" \n\t", nil},                                                     // 全空白
+		{"git status", []string{"git status"}},                                       // 无操作符：单段原样
+		{"  git status  ", []string{"git status"}},                                   // 首尾空白剥除
+		{"git status && curl evil", []string{"git status", "curl evil"}},             // &&
+		{"git status||curl evil", []string{"git status", "curl evil"}},               // ||
+		{"a;b", []string{"a", "b"}},                                                  // ;
+		{"a | b", []string{"a", "b"}},                                                // 管道
+		{"a\nb", []string{"a", "b"}},                                                 // 换行
+		{"a\r\nb", []string{"a", "b"}},                                               // CRLF
+		{"a && b || c ; d | e\nf", []string{"a", "b", "c", "d", "e", "f"}},           // 混合
+		{`echo "a && b"`, []string{`echo "a && b"`}},                                 // 双引号内不拆
+		{`echo 'x;y'`, []string{`echo 'x;y'`}},                                       // 单引号内不拆
+		{`echo \; ok`, []string{`echo \; ok`}},                                       // 反斜杠转义
+		{"a & b", []string{"a", "b"}},                                                // & 是后台操作符，拆段（#129）
+		{"https://x.com/?a=1&b=2", []string{"https://x.com/?a=1", "b=2"}},            // 不带引号时 shell 同样在此分命令（#129）
+		{`curl "https://x.com/?a=1&b=2"`, []string{`curl "https://x.com/?a=1&b=2"`}}, // 带引号 URL 完整
+		{"&& curl evil", []string{"curl evil"}},                                      // 前悬操作符：空段丢弃
+		{"a &&", []string{"a"}},                                                      // 尾悬操作符
+		{"", nil},                                                                    // 空
+		{" \n\t", nil},                                                               // 全空白
 	}
 	for _, tc := range cases {
 		got := splitCommand(tc.cmd)

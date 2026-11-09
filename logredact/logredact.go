@@ -64,9 +64,16 @@ type Rule struct {
 //
 // ⚠️ 顺序是语义的一部分：靠前的规则更精确（能定位到凭据体），
 // 靠后的更宽（整段吞掉）。靠后规则看到的是「已被精确处理过」的文本。
-// credentialSuffixGeneral 凭证词键的后缀词表（snake/kebab 复合键 + camelCase
-// 拼接共用）：前缀允许任意字母数字与 [-_] 分隔段，后缀锚定键的末词。
+// credentialSuffixGeneral 凭证词键的词表（snake/kebab 复合键 + camelCase
+// 拼接共用）：前缀允许任意字母数字与 [-_] 分隔段，凭证词锚定键的末词。
 // token 单独拆出（credentialKeyToken，见其注释）。
+//
+// 锚定口径（oagentkit/guardx#132）：凭证词**不要求是键的最后一个段**——
+// password_hash（bcrypt 摘要，Laravel/Django/DRF 生态标配字段）、
+// api_key_prefix、password_salt 这类「凭证词在中间」的键同样命中（kv 规则
+// 在凭证词后允许 [-_] 分隔的后续段）。此前只锚末段，文本 kv 规则因 password
+// 后跟 `_` 而非 [=:] 整体失配，值原文落日志。后续段仍要求 [-_] 分隔边界：
+// 「author」「passwordless」这类凭证词后直连字母的普通词不误伤。
 //
 // 覆盖口径（oagentkit/guardx#45）：pwd/pass 这类**常见缩写**与 secret/
 // password/key 的复数形态必须命中——值模式脱敏的承诺是「键表内的键，值必被
@@ -87,9 +94,9 @@ const credentialSuffixGeneral = `(?:secrets?|pass(?:words?|wds?|es)?|pwds?|passp
 const credTokenPrefix = `(?:access|refresh|auth|api|session|bearer|id|client|device|reset|invite|registration|verification|github|oauth|bot|service|user|app|personal|install|identity|login|sign(?:in|out|up)?|one[_-]?time|activation|confirm|magic|share|webhook|callback|license|csrf|xsrf|secret|admin|sudo|temp)`
 
 // credentialKeyPart 凭证词键的完整匹配段（kv 规则共用，单捕获组 = 键名）：
-// 非 token 词走「复合前缀 + 末词后缀」，token 按 credTokenPrefix 注释的
-// 收窄口径单列一支。
-const credentialKeyPart = `((?:[A-Za-z0-9]*(?:[-_][A-Za-z0-9]*)*` + credentialSuffixGeneral + `)|(?:[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*[-_])?` + credTokenPrefix + `[_-]?tokens|[A-Za-z0-9]*(?:[-_][A-Za-z0-9]*)*token)`
+// 非 token 词走「复合前缀 + 凭证词 + 任意后续段」（guardx#132：凭证词可在
+// 键的任意段，不只末段），token 按 credTokenPrefix 注释的收窄口径单列一支。
+const credentialKeyPart = `((?:[A-Za-z0-9]*(?:[-_][A-Za-z0-9]*)*` + credentialSuffixGeneral + `(?:[-_][A-Za-z0-9]*)*)|(?:[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*[-_])?` + credTokenPrefix + `[_-]?tokens|[A-Za-z0-9]*(?:[-_][A-Za-z0-9]*)*token)`
 
 // bareValue 裸值形态：可选的 scheme 前缀（RFC 7235 方案词 + 空白）连同凭据体
 // 一起算作值——方案词锚定规则先行打码后留下 `key=Bearer ****`，kv 规则若只吃
@@ -421,10 +428,12 @@ func RedactSecrets(s string, secrets ...string) string {
 // 键感知打码补上这层：键名命中凭证词表（jsonCredentialKeyRe）即整值打码。
 //
 // ⚠️ guardx#63/#76 起类型化容器同一下探：map[string]string、[]string、
-// []map[string]any、struct 导出字段（字段名过键名判定）经反射递归——此前
-// 类型开关只认 any 解码形态，类型化容器静默漏脱（脱敏器最危险的失效形态）。
-// 边界：未导出字段反射不可读（原样，请传导出形态）；json.Number 特赦
-// （数字字面量保形）；[]byte 是二进制不是文本（原样）。输出为副本，入参不动。
+// []map[string]any、struct 导出字段经反射递归——此前类型开关只认 any 解码
+// 形态，类型化容器静默漏脱（脱敏器最危险的失效形态）。struct 路径的键名
+// 取 json tag 首段（无 tag/`-` 回落字段名，guardx#130）——与 map 形态的键
+// 同一判定口径。边界：未导出字段反射不可读（原样，请传导出形态）；
+// json.Number 特赦（数字字面量保形）；[]byte 是二进制不是文本（原样）。
+// 输出为副本，入参不动。
 func RedactValue(v any) any {
 	return redactWalk(v, nil, ValueOptions{})
 }

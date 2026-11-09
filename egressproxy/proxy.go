@@ -186,6 +186,18 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 
 // serveForward 处理明文 HTTP 代理请求（绝对 URI 形态）。
 func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
+	// scheme 准入（guardx#131）：本路径只服务明文转发。客户端按 RFC 7230
+	// 绝对形态发 `GET https://host/... HTTP/1.1` 时，此前目标 scheme 被
+	// 无条件覆盖成 http——代理按明文把整条请求（请求行 + 全部头，含
+	// Authorization/Cookie）发往 https 端口。对端是 TLS 故握手必败（客户端
+	// 拿 502），看似无害，但明文字节已经上线：放行名单内的任何链路观测者
+	// 都读得到。既不是 CONNECT 路径也不在 DNS 围栏射程内——不可静默改写
+	// scheme，非 http 目标一律拒绝（应改走 CONNECT 隧道）；origin-form
+	//（空 scheme）不受影响。
+	if sch := r.URL.Scheme; sch != "" && sch != "http" {
+		http.Error(w, "egressproxy: 明文转发不支持 "+sch+" 目标——请改走 CONNECT 隧道", http.StatusBadRequest)
+		return
+	}
 	host, port, err := requestTarget(r)
 	if err != nil {
 		p.reject(w, &BlockedError{Host: r.Host, Reason: err.Error()})

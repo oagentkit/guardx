@@ -55,13 +55,21 @@ var ipv4Re = regexp.MustCompile(`\b(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|
 // 十六进制/点/冒号连续段（可带 [ ] 括号与 %zone 后缀）」——时间（12:30:45）、
 // MAC（aa:bb:cc:dd:ee:ff）、作用域符（std::cafe）等同样满足候选词法，但
 // ParseIP 判负后原样保留；宁可在候选层多验几段，不在结果层漏一段。
+//
+// 左边界放行冒号（guardx#133）：日志里「标签：地址」的高频写法
+// （host:fe80::1、node:2001:db8::5）此前因边界排除冒号而整类漏掩。放开后
+// 冒号身兼两职（标签边界 / ::1 的候选首字符），歧义由 maskStringLocked 的
+// 剥首冒号重验化解——真负例（时刻/MAC/作用域符）由 ParseIP 判负路径保住，
+// 边界不承担防误掩职责（它也防不了：候选验证才是精确闸门）。
 var ipv6Re = regexp.MustCompile(
-	`(?:^|[^0-9A-Za-z_:])` + // 左边界：串首或「非字母数字冒号」的字符（消耗后在替换里回填）
+	`(?:^|[^0-9A-Za-z_])` + // 左边界：串首或「非字母数字下划线」的字符（消耗后在替换里回填；#133 放开冒号——「host:fe80::1」的标签形态）
 		`(?:\[[0-9A-Fa-f:.%]*:[0-9A-Fa-f:.%]*:[0-9A-Fa-f:.%]*\]` + // 括号形（URL/Host 头形态，内含至少两个冒号）
 		`|[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*(?:%[0-9A-Za-z._~-]+)?)`) // 裸形 + 可选 zone 后缀
 
 // isIPv6CandByte 候选片段的首字符集（区别「左边界字符」与「候选本体」）：
-// 候选只能以十六进制位、冒号、点或左括号开头。
+// 候选只能以十六进制位、冒号、点或左括号开头。冒号有歧义（guardx#133：
+// 也可能被正则当左边界消耗）——match[0]==':' 且整段判不过时，由
+// maskStringLocked 剥首冒号重验消解。
 func isIPv6CandByte(c byte) bool {
 	switch {
 	case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
@@ -366,6 +374,12 @@ func (m *Masker) maskStringLocked(s string) string {
 		prefix := ""
 		if !isIPv6CandByte(match[0]) {
 			prefix, cand = match[:1], match[1:] // 左边界字符（正则消耗掉的），回填
+		} else if match[0] == ':' && !isIPv6Literal(match) && isIPv6Literal(match[1:]) {
+			// 冒号放开后身兼两职（guardx#133）：既是合法候选首字符（::1），
+			// 又可作为左边界（host:fe80::1 的标签冒号）。整段判不过、剥掉
+			// 首个冒号判得过 ⇒ 该冒号是标签边界不是候选本体——剥掉回填。
+			// 真负例（12:30:45、MAC）剥后仍判不过，原样保留。
+			prefix, cand = match[:1], match[1:]
 		}
 		trailing := ""
 		if !isIPv6Literal(cand) {

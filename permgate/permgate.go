@@ -47,8 +47,9 @@
 // 不告警）。工具名等价（Edit 规则匹配 Write 的写面特例）同样外置：
 // Service.ToolEquivalence 钩子，nil = DefaultToolEquivalence（即原特例）。
 //
-// 复合命令（#62/#71）：command 形态的匹配对象先按 shell 操作符（`&&` `||`
-// `;` `|` 换行，引号内不拆）拆段，段级命中的量词按规则极性取 fail-closed 侧
+// 复合命令（#62/#71/#129）：command 形态的匹配对象先按 shell 操作符（`&`
+// 含 `&&`、`||` `;` `|` 换行，引号内不拆）拆段，段级命中的量词按规则极性取
+// fail-closed 侧
 // ——allow/会话授权要求**每段**都命中（`git status && curl evil` 不得搭
 // `git status:*` 的车），deny/ask 只要**任一段**命中（复合命令里混进一段
 // 危险命令即拦）。不追求完整 shell 语法：命令替换（`$(…)`、反引号）等真
@@ -650,8 +651,9 @@ func normalizeFieldName(s string) string {
 	return strings.ReplaceAll(strings.ToLower(s), "_", "")
 }
 
-// splitCommand 按 shell 复合命令操作符拆段（#62/#71）：`;` `&&` `||` `|` 与
-// 换行；引号内（'…' / "…"，反斜杠转义）不拆；段首尾空白剥除、空段丢弃。
+// splitCommand 按 shell 复合命令操作符拆段（#62/#71/#129）：`;` `&`（含
+// `&&`——后台控制操作符，不带引号时真实 shell 在此分命令）`||` `|` 与换行；
+// 引号内（'…' / "…"，反斜杠转义）不拆；段首尾空白剥除、空段丢弃。
 // 无操作符时返回单段（首尾空白已剥）。不实现完整 shell 语法（命令替换、
 // heredoc 等真 AST 形态归 tools/bashguard）——本切分的目标是 fail-closed：
 // 让 allow 侧「每段都在名单里才放行」，操作符后的命令不得搭车；deny 侧
@@ -695,8 +697,8 @@ func splitCommand(cmd string) []string {
 				cur.WriteByte(c)
 			}
 		default:
-			switch {
-			case c == '\\':
+			switch c {
+			case '\\':
 				// 未加引号的 \x 视作字面 x（\; 不拆段）；原文保留，段内容与
 				// 输入逐字节一致（精确规则按可见命令文本书写）
 				cur.WriteByte(c)
@@ -704,18 +706,21 @@ func splitCommand(cmd string) []string {
 					i++
 					cur.WriteByte(cmd[i])
 				}
-			case c == '\'':
+			case '\'':
 				inSingle = true
 				cur.WriteByte(c)
-			case c == '"':
+			case '"':
 				inDouble = true
 				cur.WriteByte(c)
-			case c == ';', c == '\n', c == '|':
-				// `||` 与 `|` 同为分隔：相邻分隔产生的空段由 flush 丢弃
+			case ';', '\n', '|', '&':
+				// `||` 与 `|` 同为分隔：相邻分隔产生的空段由 flush 丢弃。
+				// `&` 同为分隔（guardx#129）：POSIX shell 的后台控制操作符，
+				// 不带引号时真实 shell 恰恰在此分命令——`git status & rm -rf /`
+				// 的 rm 段不得搭 allow 的车、不得藏过 deny 前缀。「单个 & 是
+				// URL 常客」的理由只对带引号的 URL 成立（引号内本就不拆，
+				// inSingle/inDouble 已保护）。`&&` 的两个 & 各自触发一次
+				// flush，空段由 flush 丢弃，与旧的 && 特判等价。
 				flush()
-			case c == '&' && i+1 < len(cmd) && cmd[i+1] == '&':
-				flush()
-				i++ // 跳过第二个 &（单个 & 是 URL 常客，不拆——操作符清单对齐 #62）
 			default:
 				cur.WriteByte(c)
 			}
