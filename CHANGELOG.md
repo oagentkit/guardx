@@ -2,11 +2,128 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.24.0] — 2026-11-09
+
+### 修复：guardx 第三轮 issue 清零二波（#121 #122 #123）
+
+* chore(deps): 依赖地板追到最新——github.com/oekit/pkg v0.39.0
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.38.0` | `v0.39.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+* fix(logredact): 截断兜底规则改 (?m) 行尾锚，逐行截断日志凭据不再泄漏（#121）
+* fix(logredact): Masker 精确盲替换只处理 AddSecret 显式串，动态注册 IP 不再毁长 IP 子串（#122）
+* fix(egressproxy): 字面量路径与 pinnedDial 三方统一 Unmap，mapped IPv6 字面量恢复可拨（#123）
+* test(egressproxy): 修 #123 端到端用例——nil Context 换 context.Background（SA1012），隧道数据改从 bufio.Reader 读防同段缓冲丢字
+---------
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+### 修复：guardx 第三轮 issue 清零（#117 #118 #119 #120）
+
+* feat(sandbox): FSFence 文件系统围栏原语——root containment+符号链接落地+cwd 语义（#117）
+「路径必须落在指定 root 内」此前归执行器三处有言、无人实现，下游各自手搓。
+FSFence 把手搓坑清单收成一份单源：
+- 文本层严格档（pathx.SanitizeRelStrict）：显式 ".." 段相对与绝对同规一律拒
+  ——Join 的文本抵消看不见符号链接，抵消根本没有机会发生
+- 符号链接落地：EvalSymlinks 之后才判包含（坑 5）；目标不存在的降级 =
+  解析已存在的最深祖先 + 文本拼回尾段，尾段组件逐个 Lstat、悬空软链拒判（坑 2）
+- root 构造期 EvalSymlinks 归一 + fail-fast（macOS /var → /private/var，坑 3）
+- cwd 语义：空与 "." 回退 root，相对 cwd 拼 root，落地后判包含（坑 4）
+- 与 permgate 的分工写进 doc：permgate 判「要不要放行」（纯函数），
+  FSFence 判「路径落在哪里」（文件系统访问）；permgate 两处「归执行器」注释
+  指向本单源
+- 新增导出：FSFence / NewFSFence / (*FSFence).Resolve / ResolveCwd / Root /
+  ErrFenceOutside / ErrFenceInvalid
+* fix(egressproxy): 黑名单模式下 IP 字面量不再借通配命中豁免 IP 围栏（#119）
+PermitResolving 的 IP 字面量提前返回不看命中来源：AllowHosts=["*"] 时
+matchAny 命中一切 ⇒ 任何字面量（169.254.169.254 / 127.0.0.1 / ::1）都不过
+IP 围栏，而同一地址写成域名会被 DNS 围栏拒——#96 不允许的「换个写法结论
+相反」形态。修法：
+- IP 字面量只有**逐字**命中名单才享「显式意图」豁免（新增 matchExact，
+  归一后全等比较）；通配命中（"*" / "*.x"）落到 egress.CheckHostResolving
+  同一套 IP 围栏（字面量分支无解析步骤，返回已检地址供拨号钉住）
+- 字面量判定不是解析判定，不被 SkipDNSCheck 豁免；exotic IPv4 词法形态
+  （0177.0.0.1 一类）在 SkipDNSCheck=true 时照常拒绝——与判定顺序文档的
+  「词法层直接拒绝」对齐（此前 SkipDNSCheck 把这道词法闸也跳过了）
+- Policy.AllowHosts / SkipDNSCheck 的 doc 同步收敛豁免语义
+- 回归：黑名单拒内网/元数据/回环/CGNAT/ULA 字面量、公网照常放行、
+  逐字条目保显式意图、SkipDNSCheck 不豁免字面量与 exotic、域名条目走
+  DNS 围栏语义不变
+* fix(logredact): 载荷裁剪支持截断形态（无闭合引号）并落告警信号（#120）
+字段正则原要求值的**首尾引号都闭合**——日志落盘前的截断（按字节上限裁、
+按行切分多行 JSON、maxMessageLen）几乎必然把字符串字面量切在半途：正则
+零命中，既不打码也不告警，载荷残片原文全量落盘。而越长的载荷越容易被
+截断，缺口方向正好落在最需要保护的一侧。修法：
+- payloadFieldRe 加「到串尾」兜底分支：闭合走现有路径；未闭合时把冒号后
+  的剩余整段替换成**截断形态**标记 "<N bytes scrubbed, truncated>"——
+  长度取剩余字节数（精度不重要，不落原文才是契约）
+- 截断标记与闭合标记刻意不同字：这就是告警信号——新增
+  HasTruncatedPayloadMarker 收成单一判定点，告警侧别手写字符串匹配
+- 兜住「恰好切在反斜杠后」的形态（孤立反斜杠构不成转义对但同样是残片）
+- 幂等保持：截断标记落成闭合字符串后第二遍原样保留（payloadMarkerRe
+  扩展覆盖两形态）
+- 回归：截断半途/跨行 \\n 转义/多字节字符切半/反斜杠后截断/幂等/
+  Redactor 高频路径/白名单外字段不殃及/标记穿过内建形状规则/闭合形态
+  不触发告警（对照）
+* fix(egress): 补齐 ::/96 与 fec0::/10 禁止段；与 urlguard 等价性语料钉住+选型对照矩阵（#118）
+与 oekit/pkg/urlguard 双实现的判定表双维护是安全分叉风险：一次补丁只落
+一边，另一边的消费方就静默留着洞（本仓 #2 与下游 pigeonbox 双口径是实证）。
+本次落法（不合并实现，理由见 PR 正文）：
+- 等价性语料测试（egress/urlguard_equiv_test.go）：同一批 URL 语料跑
+  egress.Check 与 urlguard.CheckURL，结论必须一致；不一致条目要么修、
+  要么进「已知差异」表（diffWhy 凭据）——任一侧段表漂移 CI 即红
+- 语料比对发现的两处既有分叉在 egress 侧补齐：ipv6SpecialUse 增
+  ::/96（IPv4-compatible，::127.0.0.1 即回环的 v6 写法——4in6 同族逃逸
+  路径此前漏挡）与 fec0::/10（site-local，RFC 3879 已废弃但企业网历史在用）
+- 已知差异表：约定域名后缀（.internal/.local/.localdomain）与非 ASCII
+  host 的字面量层结论不同——egress 域名不解析是明示边界，解析层兜底
+- 选型定位：egress 包 doc 与 README 各加「谁该选哪套」+ 能力对照矩阵
+  （精确 host 钉版 / 拨号层守卫 / 解析层判定 / 重定向守卫逐条标注）
+* test(logredact): 修掉语料构造里的无效赋值（ineffassign）（#120）
+---------
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.40.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.39.0` | `v0.40.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.39.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.38.0` | `v0.39.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+
 ## [v0.23.4] — 2026-11-08
 
-### 依赖地板：oekit 基座追平——pkg v0.38.0 / logx v0.8.11 / concurrency v0.29.0
-
-oekit BOM v0.2.11 兼容地板门禁（oekit#163）对齐轮；无代码变更。
+- 与 v0.23.3 相比无代码差异（版本号/打包变更）
 
 ## [v0.23.3] — 2026-11-08
 
