@@ -697,8 +697,8 @@ func splitCommand(cmd string) []string {
 				cur.WriteByte(c)
 			}
 		default:
-			switch {
-			case c == '\\':
+			switch c {
+			case '\\':
 				// 未加引号的 \x 视作字面 x（\; 不拆段）；原文保留，段内容与
 				// 输入逐字节一致（精确规则按可见命令文本书写）
 				cur.WriteByte(c)
@@ -706,13 +706,13 @@ func splitCommand(cmd string) []string {
 					i++
 					cur.WriteByte(cmd[i])
 				}
-			case c == '\'':
+			case '\'':
 				inSingle = true
 				cur.WriteByte(c)
-			case c == '"':
+			case '"':
 				inDouble = true
 				cur.WriteByte(c)
-			case c == ';', c == '\n', c == '|', c == '&':
+			case ';', '\n', '|', '&':
 				// `||` 与 `|` 同为分隔：相邻分隔产生的空段由 flush 丢弃。
 				// `&` 同为分隔（guardx#129）：POSIX shell 的后台控制操作符，
 				// 不带引号时真实 shell 恰恰在此分命令——`git status & rm -rf /`
