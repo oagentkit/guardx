@@ -10,20 +10,29 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"strings"
 )
 
-// jsonCredentialKeyRe 结构化路径的键名命中判定：键以凭证词**结尾**即命中
-// （snake/kebab 复合键、camelCase 拼接、复数形态均可——"db_password"、
-// "github_token"、"apiKey"、"passwords"）。
+// jsonCredentialKeyRe 结构化路径的键名命中判定：键含凭证词（作为 [-_]
+// 分隔的**完整段**、后面允许接任意后续段）即命中（snake/kebab 复合键、
+// camelCase 拼接、复数形态均可——"db_password"、"github_token"、"apiKey"、
+// "passwords"、"password_hash"、"api_key_prefix"）。
+//
+// 锚定口径（oagentkit/guardx#132）：凭证词不要求是键的最后一个段——
+// password_hash（bcrypt 摘要，Laravel/Django/DRF 生态标配字段）、
+// api_key_prefix、password_salt 这类「凭证词在中间」的键同样命中。此前
+// 只锚 `$` 末段，这类键结构化面不整值打码、值过形状规则后原文保留。
+// 后续段要求 [_-] 分隔边界：凭证词后直连字母的普通词（"author"）不误伤。
 //
 // token 复数收窄（oagentkit/guardx#52，与文本面 credTokenPrefix 同口径）：
 // `tokens` 结尾的键只在「凭证前缀段 + tokens」或整键恰为 "tokens" 时命中——
 // OpenAI 兼容 usage 块的 prompt_tokens / completion_tokens / total_tokens /
 // cached_tokens / reasoning_tokens 等计量字段不再整值打码（此前 v0.18.0 把
 // 它们全打成 "****"，计价/评测/配额读到掩码）。单数 `token` 结尾保持全量
-// 命中（*_token / xToken 几乎恒为凭证）。复数分支的键名前缀段 + 凭证前缀
-// 必须**同时**成立（分支内 CRED 必选），防止 "scout_tokens" 借「s_cout_」
-// 分段绕进凭证前缀枚举。
+// 命中（*_token / xToken 几乎恒为凭证）——token 词**不**参与 #132 的任意段
+// 放开（token_expiry 这类计量键按 #52 契约保留，token 词仍只锚键尾）。
+// 复数分支的键名前缀段 + 凭证前缀必须**同时**成立（分支内 CRED 必选），
+// 防止 "scout_tokens" 借「s_cout_」分段绕进凭证前缀枚举。
 //
 // 与文本规则的词表同一口径但独立实现（文本键判定长在 kv 正则里，无法复用
 // 成独立谓词；两处词表要一起改）。刻意不含裸 "key"（"sort_key"/"cache_key"
@@ -36,7 +45,7 @@ import (
 const jsonCredentialSuffixGeneral = `(?:secrets?|pass(?:words?|wds?|es)?|pwds?|passphrases?|api[_-]?keys?|access[_-]?keys?|private[_-]?keys?|secret[_-]?keys?|client[_-]?keys?|auths?|authorization|credentials?|kubeconfig)`
 
 var jsonCredentialKeyRe = regexp.MustCompile(
-	`(?i)(?:(?:` + jsonCredentialSuffixGeneral + `)$` +
+	`(?i)(?:(?:` + jsonCredentialSuffixGeneral + `)(?:[_-][a-z0-9_-]*)*$` +
 		`|token$` +
 		`|^tokens$` +
 		`|^(?:[a-z0-9]+(?:[_-][a-z0-9]+)*[_-])?` + credTokenPrefix + `[_-]?tokens$)`)
@@ -56,7 +65,9 @@ type ValueOptions struct {
 	// 内置词表之上；返回 false 不豁免内置命中——要豁免请走自持 Redactor，
 	// 内置词表的「值必被打码」承诺不因回调而松动）。nil = 仅内置词表。
 	// （oagentkit/guardx#51：集成方喂自己的 isCredentialKey，替掉为兜自家
-	// 键形态而维护的整套绕行脱敏器。）
+	// 键形态而维护的整套绕行脱敏器。）struct 路径传的是 jsonFieldName 取的
+	// 键名——json tag 首段优先、无 tag/`-` 回落字段名（guardx#130），与
+	// map 形态见到的键同一口径。
 	IsCredentialKey func(key string) bool
 	// ExtraRules 追加到字符串叶子文本规则的扩展表（guardx#76 的**值模式**
 	// 检测缝）：结构化路径的每个字符串叶子按「先内置、后扩展」过
@@ -178,8 +189,9 @@ func redactWalkDepth(v any, payload map[string]struct{}, opts ValueOptions, dept
 // []string、[]map[string]any、struct 导出字段等 Go 侧类型化容器此前一律
 // default 原样返回——脱敏器最危险的失效形态：**静默漏脱**（事件载荷以类型化
 // 容器传入时连接串/Bearer 头原文落库）。本函数按 map/slice/array/struct/
-// 指针/接口递归，语义与 any 形态同源：字符串键/结构体字段名过键名与载荷
-// 判定、字符串叶子过文本规则（含 ExtraRules）、容器逐元素下探。
+// 指针/接口递归，语义与 any 形态同源：字符串键/结构体键名（json tag 首段
+// 优先、回落字段名，guardx#130）过键名与载荷判定、字符串叶子过文本规则
+// （含 ExtraRules）、容器逐元素下探。
 //
 // 刻意的边界：
 //   - json.Number 特赦——它是命名 string，但是数字字面量不是文本（JSON 路径
@@ -327,9 +339,14 @@ func walkReflectSeq(rv reflect.Value, payload map[string]struct{}, opts ValueOpt
 	return out.Interface()
 }
 
-// walkReflectStruct struct 的下探：**字段名**过载荷/键名判定（Password/
-// AuthToken 命中即整值掩码）；先整体拷贝再覆写下探结果——未导出字段
-// （反射不可读）与无需处理的原样保留。
+// walkReflectStruct struct 的下探：**键名**过载荷/键名判定（Password/
+// AuthToken 命中即整值掩码）；键名取 jsonFieldName（guardx#130：json tag
+// 首段优先，序列化后 JSON 载荷里的真名——同一份数据走 map[string]any（键
+// api_key）与走 struct（字段 APIKeyField、tag api_key）必须同一判定口径，
+// 此前用 Go 字段名（不读 tag）判凭证词表，struct 形态静默漏脱）；tag 为
+// `-`（明确不序列化）或缺失时回落字段名——回落保证值仍被下探，不因 tag
+// 而整字段跳过。先整体拷贝再覆写下探结果——未导出字段（反射不可读）与
+// 无需处理的原样保留。
 func walkReflectStruct(rv reflect.Value, payload map[string]struct{}, opts ValueOptions, depth int) any {
 	if depth >= maxWalkDepth {
 		return rv.Interface()
@@ -343,7 +360,8 @@ func walkReflectStruct(rv reflect.Value, payload map[string]struct{}, opts Value
 			continue
 		}
 		fv := rv.Field(i)
-		if _, isPayload := payload[f.Name]; isPayload {
+		name := jsonFieldName(f)
+		if _, isPayload := payload[name]; isPayload {
 			if s, isStr := stringValueOf(fv); isStr {
 				if payloadMarkerRe.MatchString(s) {
 					out.Field(i).Set(reflect.ValueOf(s)) // 已是标记 ⇒ 幂等保留
@@ -354,7 +372,7 @@ func walkReflectStruct(rv reflect.Value, payload map[string]struct{}, opts Value
 			}
 			// 非字符串形态的载荷值：下探（与 any 形态同语义）
 		}
-		if isCredentialKeyName(f.Name, opts) {
+		if isCredentialKeyName(name, opts) {
 			if mv, ok := maskValueFor(f.Type); ok {
 				out.Field(i).Set(mv)
 				continue
@@ -363,6 +381,20 @@ func walkReflectStruct(rv reflect.Value, payload map[string]struct{}, opts Value
 		out.Field(i).Set(walkAssignable(fv, f.Type, payload, opts, depth+1))
 	}
 	return out.Interface()
+}
+
+// jsonFieldName struct 路径的键名（guardx#130）：json tag 首段优先——它是
+// 序列化后 JSON 载荷里的真名（Go 惯例禁止字段名带下划线，凭证键只能活在
+// tag 里）；tag 为 `-`（明确不序列化）或为空时回落 Go 字段名，与 permgate
+// structFieldString 的 tag 读取同口径。载荷字段白名单与凭证词表、
+// ValueOptions.IsCredentialKey 回调都用这个名字。
+func jsonFieldName(f reflect.StructField) string {
+	if tag, ok := f.Tag.Lookup("json"); ok {
+		if n := strings.Split(tag, ",")[0]; n != "" && n != "-" {
+			return n
+		}
+	}
+	return f.Name
 }
 
 // walkAssignable 下探后回填到目标元素/字段类型：叶子文本规则返回裸 string，
