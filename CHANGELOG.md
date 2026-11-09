@@ -2,6 +2,27 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.24.1] — 2026-11-10
+
+### 修复(scope)：五处 fail-open 口径收口——拆段/词表锚定/json tag/scheme 降级/IPv6 边界（#129 #130 #131 #132 #133）
+
+fix(permgate): 拆段 switch 改 tagged 形态——staticcheck QF1002（lint 门禁红）
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.41.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.40.0` | `v0.41.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
 ## [v0.24.0] — 2026-11-09
 
 ### 修复：guardx 第三轮 issue 清零二波（#121 #122 #123）
