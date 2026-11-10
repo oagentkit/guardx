@@ -52,9 +52,12 @@
 // fail-closed 侧
 // ——allow/会话授权要求**每段**都命中（`git status && curl evil` 不得搭
 // `git status:*` 的车），deny/ask 只要**任一段**命中（复合命令里混进一段
-// 危险命令即拦）。不追求完整 shell 语法：命令替换（`$(…)`、反引号）等真
-// AST 形态归 tools/bashguard，本包只做 stdlib 操作符切分，拆不动的形态宁可
-// 让 allow 失配（落 ask），不得让操作符后的命令搭车放行。
+// 危险命令即拦）。不追求完整 shell 语法：真 AST 形态（引号嵌套、算术展开等）
+// 归 tools/bashguard，本包只做 stdlib 操作符切分，拆不动的形态宁可让 allow
+// 失配（落 ask），不得让操作符后的命令搭车放行。
+// 命令替换（#144）：段内含未引用化的 `$(`、反引号、`${` 时该段 allow 恒失配
+// （单引号内为字面；双引号内照样执行/展开，不豁免）——替换体的真实命令
+// 运行期才展开，字面前缀核对不了它，宁可落 ask（hasCommandSubstitution）。
 package permgate
 
 import (
@@ -755,10 +758,15 @@ func matchRuleContent(content string, faces []subjectFace, pol Behavior) bool {
 
 // faceMatch 单面命中：Allow 全段命中（universal），Deny/Ask 任一段命中
 // （existential）——两个方向都是各自的保守侧。
+// Allow 侧另有一条替换体守门（guardx#144）：段内含命令替换/参数展开面
+// （$(`、反引号、`${`）时该段恒失配——allow 前缀按字面文本核对，替换体的
+// 真实命令在运行期才展开（`git status $(curl evil)` 搭 `git status:*` 的车
+// 曾原样放行，与「拆不动的形态宁可失配」的包注释承诺相反；deny/ask 不受
+// 影响，仍按既有保守语义）。
 func faceMatch(face subjectFace, content, prefix string, isPrefix bool, pol Behavior) bool {
 	if pol == Allow {
 		for _, seg := range face {
-			if !segMatch(content, prefix, isPrefix, seg) {
+			if hasCommandSubstitution(seg) || !segMatch(content, prefix, isPrefix, seg) {
 				return false
 			}
 		}
@@ -781,6 +789,34 @@ func segMatch(content, prefix string, isPrefix bool, sub string) bool {
 		return true
 	case !isPrefix && sub == content:
 		return true
+	}
+	return false
+}
+
+// hasCommandSubstitution 报告段内是否存在命令替换/参数展开面（`$(`、反引号、
+// `${`——guardx#144 的 allow 守门）。扫描口径：
+//   - 单引号内是字面（不计数）——shell 语义，`'$(x)'` 原样传递；
+//   - 双引号内 `$(…)` 与反引号**照样执行**、`${…}` 照样展开（双引号不是
+//     护身符，计数）；
+//   - 反斜杠转义的 `\$`、`\“、`\${` 为字面（不计数）。
+func hasCommandSubstitution(seg string) bool {
+	inSingle := false
+	for i := 0; i < len(seg); i++ {
+		c := seg[i]
+		switch {
+		case inSingle:
+			if c == '\'' {
+				inSingle = false
+			}
+		case c == '\\':
+			i++ // 转义下一字符（与 splitCommand 的 \x 字面化同口径）
+		case c == '\'':
+			inSingle = true
+		case c == '$' && i+1 < len(seg) && (seg[i+1] == '(' || seg[i+1] == '{'):
+			return true
+		case c == '`':
+			return true
+		}
 	}
 	return false
 }
