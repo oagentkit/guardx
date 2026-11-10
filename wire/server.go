@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/oagentkit/guardx/toolfail"
 )
@@ -349,7 +350,8 @@ type Budget struct {
 	MaxCalls int
 	// MaxBytes 累计输出字节上限。0 = 不限。
 	MaxBytes int
-	// st 记账状态（指针：Budget 按值传递时不得复制锁）。
+	// st 记账状态。**只经 state() 的原子原语读写**（裸指针保持 Budget 可按值
+	// 传递不复制锁；st 指针本身的并发惰性建经 CAS 同步，见 state）。
 	st *budgetState
 }
 
@@ -361,12 +363,25 @@ type budgetState struct {
 	usedBytes int
 }
 
-// state 取记账状态（惰性初始化，供零值 Budget 使用）。
+// state 取记账状态（**并发安全**惰性初始化，供零值 Budget 使用）。
+// 此前是无锁 check-then-act（oagentkit/guardx#143）：并发首笔两个 goroutine
+// 各建一个 budgetState 并写回——b.st 是 data race（-race 必红），且记账分裂
+// 到两个 state、usedCalls 各自少算，MaxCalls=N 实放约 2N，父侧预算权威
+// （「子进程说了不算」）被并发击穿。CAS 保证只建一份，败者共用先建者的
+// state。budgetState 自带的 mu 只护计数，护不到懒建本身。
+// atomic.Value 无 LoadOrStore、atomic.Pointer 带 noCopy 会破坏 Budget 的按值
+// 传递语义，故对指针字段直接上 atomic 原语（经典 CAS 惰建形态）。
 func (b *Budget) state() *budgetState {
-	if b.st == nil {
-		b.st = &budgetState{}
+	for {
+		st := (*budgetState)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&b.st))))
+		if st != nil {
+			return st
+		}
+		fresh := &budgetState{}
+		if atomic.CompareAndSwapPointer((*unsafe.Pointer)(unsafe.Pointer(&b.st)), nil, unsafe.Pointer(fresh)) {
+			return fresh
+		}
 	}
-	return b.st
 }
 
 // Used 返回已用的调用数与字节数。
