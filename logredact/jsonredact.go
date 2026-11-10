@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // jsonCredentialKeyRe 结构化路径的键名命中判定：键含凭证词（作为 [-_]
@@ -197,13 +198,24 @@ func redactWalkDepth(v any, payload map[string]struct{}, opts ValueOptions, dept
 //   - json.Number 特赦——它是命名 string，但是数字字面量不是文本（JSON 路径
 //     大整数保形依赖它原样透传）；其余命名 string 类型（type Password string）
 //     仍是文本。
-//   - []byte 是二进制载荷不是文本，逐字节下探只有拷贝开销没有检测面。
+//   - []byte（guardx#obs88 交叉面收口）：UTF-8 文本载荷不再豁免——JSON 走
+//     RedactJSON 键感知打码、非 JSON 文本走文本规则（与顶层 RawMessage 同一
+//     语义）；非 UTF-8 才视为二进制原样（检测面为空，base64 落盘）。此前嵌套
+//     容器里的 []byte 一律原样——同一份凭证包一层 map 即绕开打码（obs#88）。
+//   - error 叶子（obs#77 语义推广到嵌套）：标准 error 的文本在 unexported
+//     字段、反射下探够不到——类型断言直取 Error() 过文本规则。此前嵌套层
+//     error 原样落盘。
 //   - 未导出字段反射不可读（walkReflectStruct 原样保留）。
 //   - 输出为副本（新容器/新结构体），不污染入参。
 func redactReflect(v any, payload map[string]struct{}, opts ValueOptions, depth int) any {
 	rv := reflect.ValueOf(v)
 	if !rv.IsValid() {
 		return v
+	}
+	// error 叶子先于一切容器/反射处理（obs#88：嵌套层与顶层同语义——顶层在
+	// 消费方类型开关里做，嵌套层在这里做，单源 Redact 文本规则）。
+	if err, ok := v.(error); ok {
+		return Redact(err.Error())
 	}
 	// any 形态快路径：交回类型开关，键判定/载荷/下探同一份实现（嵌在类型化
 	// 容器里的 any 容器与顶层 any 容器行为一致）
@@ -227,7 +239,16 @@ func redactReflect(v any, payload map[string]struct{}, opts ValueOptions, depth 
 			return v
 		}
 		if rv.Type().Elem().Kind() == reflect.Uint8 {
-			return v
+			// UTF-8 文本载荷按文本处理（JSON→键感知 / 非 JSON→文本规则）；
+			// 非 UTF-8 是真二进制——检测面为空，原样（base64 落盘）。
+			b, _ := v.([]byte)
+			if !utf8.Valid(b) {
+				return v
+			}
+			if json.Valid(b) {
+				return RedactJSON(b)
+			}
+			return RedactWith(string(b), opts.ExtraRules)
 		}
 		return walkReflectSeq(rv, payload, opts, depth)
 	case reflect.Struct:
