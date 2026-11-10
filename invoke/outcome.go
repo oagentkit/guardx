@@ -21,6 +21,10 @@ package invoke
 //
 // 「这次演练若真跑会不会跑」（WouldExecute）是第三个**独立**事实：它与
 // 「拒绝/演练」都不正交（演练里两种都有），所以同样不能合成进同一个 bool。
+//
+// 「命令到底发出去没有」（Delivery）同样是一个**独立**事实——「跑没跑」之外
+// 的第三问：not_sent（重试安全）/ maybe_sent（永不重放）/ 空（没人说，
+// 不得读作「没送到」）。它与前三格互不推导、互不覆盖——见 Delivery。
 type Outcome struct {
 	// Refused 非空 ⇒ 执行体拒绝执行本次动作；值是拒绝原因。
 	//
@@ -39,6 +43,16 @@ type Outcome struct {
 	// 语义边界：**只在 DryRun 为真时有意义**；不是演练时恒为 false。
 	// （演练什么都没跑，这一条不因 WouldExecute 而变——见 Acted。）
 	WouldExecute bool
+	// Delivery 投递状态：命令到底发出去没有——「跑没跑」之外的第三问（#134）。
+	//
+	// 只能由执行体声明：「请求发到了哪」只有执行体知道，链与门禁都看不见。
+	// 空 = 未声明 = 没人说：**不得读作「没送到」**（缺位 ≠ not_sent——
+	// 没有任何一层声明时，唯一安全的读法是「可能已送出」）。
+	//
+	// 与 Refused / DryRun / WouldExecute 互不推导、互不覆盖：拒绝与演练的
+	// 留痕同样可以（且应当）带上投递声明。审计把它当独立一列，与
+	// Allowed / Acted 并列；语义与判定口径见 Delivery。
+	Delivery Delivery
 }
 
 // Acted 报告「事情做没做」。

@@ -173,6 +173,11 @@ type StageResult struct {
 // 一条留痕里有**两层结论**（门禁层 / 动作层），缺一层审计就答不全问题：
 // Allowed / Err 是门禁层结论（是否放行到达了执行体 / 收口原因），
 // Outcome 是动作层结论（事情做没做）。见 Outcome 的说明。
+//
+// 动作层里另有**第三问**：命令到底发出去没有（Delivery）——「会重复执行 =
+// 危险」的命令类工具靠它区分「没投递」（重试安全）与「可能已投递」（永不重放）。
+// 它同样由执行体声明、链原样带进留痕，经 DeliveryOf 读；独立一列，
+// 与 Allowed / Acted 互不推导。见 Delivery 的说明。
 type Record struct {
 	Call   Call
 	Stages []StageResult
