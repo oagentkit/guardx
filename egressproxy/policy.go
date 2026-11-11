@@ -27,7 +27,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -276,12 +276,7 @@ func (p Policy) portAllowed(port int) bool {
 	if len(p.AllowPorts) == 0 {
 		return port == 80 || port == 443
 	}
-	for _, x := range p.AllowPorts {
-		if x == port {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(p.AllowPorts, port)
 }
 
 // Ports 返回落到生效值的端口清单（空 ⇒ 80/443），顺序确定。
@@ -290,7 +285,7 @@ func (p Policy) Ports() []int {
 		return []int{80, 443}
 	}
 	out := append([]int(nil), p.AllowPorts...)
-	sort.Ints(out)
+	slices.Sort(out)
 	return out
 }
 

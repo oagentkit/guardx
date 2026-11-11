@@ -8,8 +8,9 @@
 package logredact
 
 import (
+	"cmp"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -407,7 +408,7 @@ func hintMatch(r Rule, m string) string {
 // 长秘密优先替换（防短串是长串前缀时留下尾段泄漏），空串忽略。
 func RedactSecrets(s string, secrets ...string) string {
 	sorted := append([]string(nil), secrets...)
-	sort.Slice(sorted, func(i, j int) bool { return len(sorted[i]) > len(sorted[j]) })
+	slices.SortFunc(sorted, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
 	for _, sec := range sorted {
 		if sec == "" {
 			continue
