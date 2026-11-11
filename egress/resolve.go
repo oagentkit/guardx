@@ -79,7 +79,7 @@ func CheckHostResolving(ctx context.Context, host string, p Policy, r Resolver) 
 		return nil, errors.Wrap(err, "egress: 域名解析失败（fail-closed）: "+h)
 	}
 	if len(ips) == 0 {
-		return nil, errors.Errorf("egress: 域名解析结果为空（fail-closed）: %s", h)
+		return nil, fmt.Errorf("egress: 域名解析结果为空（fail-closed）: %s", h)
 	}
 	out := make([]netip.Addr, 0, len(ips))
 	for _, ip := range ips {
@@ -87,7 +87,7 @@ func CheckHostResolving(ctx context.Context, host string, p Policy, r Resolver) 
 		if !ok {
 			// 非法长度不属于任何合法解析结果——按解析出「判不出来的地址」
 			// fail-closed，而不是跳过（跳过 = 假装没看见）。
-			return nil, errors.Errorf("egress: 域名 %s 解析出无法判定的地址 %v", h, ip)
+			return nil, fmt.Errorf("egress: 域名 %s 解析出无法判定的地址 %v", h, ip)
 		}
 		effective, reason := addrPolicy(addr, p)
 		if reason != "" {

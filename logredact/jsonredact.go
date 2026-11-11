@@ -253,7 +253,7 @@ func redactReflect(v any, payload map[string]struct{}, opts ValueOptions, depth 
 		return walkReflectSeq(rv, payload, opts, depth)
 	case reflect.Struct:
 		return walkReflectStruct(rv, payload, opts, depth)
-	case reflect.Ptr:
+	case reflect.Pointer:
 		if rv.IsNil() {
 			return v
 		}

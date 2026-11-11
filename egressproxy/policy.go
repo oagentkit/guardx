@@ -31,7 +31,9 @@ import (
 	"strconv"
 	"strings"
 
+	"fmt"
 	"github.com/oagentkit/guardx/egress"
+
 	"github.com/oekit/pkg/errors"
 )
 
@@ -124,7 +126,7 @@ func (p Policy) Validate() error {
 	}
 	for _, port := range p.AllowPorts {
 		if port < 1 || port > 65535 {
-			return errors.Errorf("egressproxy: AllowPorts 含非法端口 %d（合法 1-65535）", port)
+			return fmt.Errorf("egressproxy: AllowPorts 含非法端口 %d（合法 1-65535）", port)
 		}
 	}
 	return nil
@@ -140,15 +142,15 @@ func validateHostPattern(h string) error {
 	}
 	if strings.HasPrefix(s, "*.") {
 		if len(s) <= 2 {
-			return errors.Errorf("通配条目 %q 没有后缀", h)
+			return fmt.Errorf("通配条目 %q 没有后缀", h)
 		}
 		if strings.ContainsAny(s[2:], "*?") {
-			return errors.Errorf("通配条目 %q 只支持前置 \"*.\"，不支持中间通配", h)
+			return fmt.Errorf("通配条目 %q 只支持前置 \"*.\"，不支持中间通配", h)
 		}
 		return nil
 	}
 	if strings.ContainsAny(s, "*?") {
-		return errors.Errorf("通配条目 %q 只支持前置 \"*.\"", h)
+		return fmt.Errorf("通配条目 %q 只支持前置 \"*.\"", h)
 	}
 	return nil
 }

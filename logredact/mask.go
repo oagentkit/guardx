@@ -298,7 +298,7 @@ func (m *Masker) walkReflect(v any, kind walkKind, depth int) any {
 			out.Field(i).Set(m.walkAssignable(rv.Field(i), f.Type, kind, depth+1))
 		}
 		return out.Interface()
-	case reflect.Ptr:
+	case reflect.Pointer:
 		if rv.IsNil() {
 			return v
 		}
