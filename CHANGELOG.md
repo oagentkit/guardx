@@ -2,6 +2,18 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.24.3] — 2026-11-11
+
+### 修复(logredact)：嵌套容器里的 []byte 与 error 叶子纳入打码（obs#88 交叉面）
+
+redactReflect 两处收口：
+- uint8 切片：UTF-8 文本不再豁免——JSON 走 RedactJSON 键感知、非 JSON 文本走
+  文本规则；非 UTF-8 真二进制才原样（检测面为空）
+- error 叶子：类型断言直取 Error() 过文本规则（#77 顶层语义推广到嵌套——
+  标准 error 文本在 unexported 字段、反射够不到）
+此前同一份凭证包一层 map 即绕开顶层类型分派（obs#88：#57 嵌套凭据与 #76/#77
+顶层字节/error 两线的交叉缺口）。
+
 ## [v0.24.2] — 2026-11-11
 
 ### 修复(wire,permgate)：预算惰建并发安全 + 命令替换段 allow 失配（#143 #144）
