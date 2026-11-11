@@ -2,6 +2,12 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.24.5] — 2026-11-12
+
+### 修复(logredact)：reflect.Ptr → reflect.Pointer——go 1.26 工具链 govet inline 检查（弃用别名）
+
+- 404f101
+
 ## [v0.24.4] — 2026-11-12
 
 - 杂务(modernize)：sort.* → slices.*/min-max 内建——吃 Go 1.21+ 标准库，零行为变化
