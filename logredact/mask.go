@@ -1,10 +1,11 @@
 package logredact
 
 import (
+	"cmp"
 	"net"
 	"reflect"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -362,7 +363,7 @@ func (m *Masker) maskStringLocked(s string) string {
 			origins = append(origins, origin)
 		}
 	}
-	sort.Slice(origins, func(i, j int) bool { return len(origins[i]) > len(origins[j]) })
+	slices.SortFunc(origins, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
 	for _, origin := range origins {
 		s = strings.ReplaceAll(s, origin, m.origins[origin])
 	}

@@ -1,8 +1,10 @@
 package sandbox
 
 import (
+	"cmp"
 	"context"
-	"sort"
+	"slices"
+	"strings"
 	"sync"
 
 	"github.com/oekit/pkg/errors"
@@ -153,11 +155,11 @@ func (r *Registry) Providers() []Provider {
 	defer r.mu.RUnlock()
 	out := make([]Provider, len(r.providers))
 	copy(out, r.providers)
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Level() != out[j].Level() {
-			return out[i].Level() < out[j].Level()
-		}
-		return out[i].ID() < out[j].ID()
+	slices.SortStableFunc(out, func(a, b Provider) int {
+		return cmp.Or(
+			cmp.Compare(a.Level(), b.Level()),
+			strings.Compare(a.ID(), b.ID()),
+		)
 	})
 	return out
 }
