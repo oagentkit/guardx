@@ -5,7 +5,7 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/oekit/pkg/errors"
+	"fmt"
 )
 
 // NewClient 派生一个把**同一放行面**落到拨号层的 *http.Client。
@@ -47,7 +47,7 @@ func (p Policy) NewClient(base *http.Client) (*http.Client, error) {
 	}
 	ht, ok := tr.(*http.Transport)
 	if !ok {
-		return nil, errors.Errorf("egress: 传输器 %T 不是 *http.Transport，挂不上拨号守卫", tr)
+		return nil, fmt.Errorf("egress: 传输器 %T 不是 *http.Transport，挂不上拨号守卫", tr)
 	}
 	// Clone：不改调用方的传输器，也不改全局默认传输器。
 	clone := ht.Clone()
@@ -106,7 +106,7 @@ const maxRedirects = 10
 // 拨号层守卫——两层判的是同一份放行面，故不会出现「一层放行、一层拒」的假红。
 func (p Policy) CheckRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= maxRedirects {
-		return errors.Errorf("egress: 重定向超过 %d 跳（停在 %s）", maxRedirects, req.URL.Redacted())
+		return fmt.Errorf("egress: 重定向超过 %d 跳（停在 %s）", maxRedirects, req.URL.Redacted())
 	}
 	return checkURLWith(req.URL, p)
 }

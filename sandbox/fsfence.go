@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"fmt"
+
 	"github.com/oekit/pkg/errors"
 	"github.com/oekit/pkg/pathx"
 )
@@ -91,7 +93,7 @@ func NewFSFence(root string) (*FSFence, error) {
 		return nil, errors.New("sandbox: FSFence root 为空")
 	}
 	if !filepath.IsAbs(root) {
-		return nil, errors.Errorf("sandbox: FSFence root 必须是绝对路径，实得 %q", root)
+		return nil, fmt.Errorf("sandbox: FSFence root 必须是绝对路径，实得 %q", root)
 	}
 	real, err := filepath.EvalSymlinks(filepath.Clean(root))
 	if err != nil {
@@ -102,7 +104,7 @@ func NewFSFence(root string) (*FSFence, error) {
 		return nil, errors.Wrap(err, "sandbox: FSFence root 不可读", "root", real)
 	}
 	if !fi.IsDir() {
-		return nil, errors.Errorf("sandbox: FSFence root 不是目录: %s", real)
+		return nil, fmt.Errorf("sandbox: FSFence root 不是目录: %s", real)
 	}
 	return &FSFence{root: real}, nil
 }

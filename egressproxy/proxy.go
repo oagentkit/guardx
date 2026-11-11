@@ -12,7 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"fmt"
 	"github.com/oagentkit/guardx/sandbox"
+
 	"github.com/oekit/pkg/errors"
 )
 
@@ -57,11 +59,11 @@ func New(p Policy) (*Proxy, error) {
 		if addrs, ok := ctx.Value(pinnedAddrsKey{}).([]netip.Addr); ok && len(addrs) > 0 {
 			_, portStr, perr := net.SplitHostPort(addr)
 			if perr != nil {
-				return nil, errors.Errorf("egressproxy: 已钉拨号地址 %q 不是 host:port 形态", addr)
+				return nil, fmt.Errorf("egressproxy: 已钉拨号地址 %q 不是 host:port 形态", addr)
 			}
 			portNum, aerr := strconv.Atoi(portStr)
 			if aerr != nil || portNum < 1 || portNum > 65535 {
-				return nil, errors.Errorf("egressproxy: 已钉拨号端口 %q 非法", portStr)
+				return nil, fmt.Errorf("egressproxy: 已钉拨号端口 %q 非法", portStr)
 			}
 			return pinnedDial(d, ctx, addrs, portNum)
 		}
@@ -262,11 +264,11 @@ func pinnedDial(d *net.Dialer, ctx context.Context, addrs []netip.Addr, port int
 	pin.Control = func(network, address string, _ syscall.RawConn) error {
 		host, _, err := net.SplitHostPort(address)
 		if err != nil {
-			return errors.Errorf("egressproxy: 已钉拨号地址 %q 不是 host:port 形态", address)
+			return fmt.Errorf("egressproxy: 已钉拨号地址 %q 不是 host:port 形态", address)
 		}
 		got, err := netip.ParseAddr(host)
 		if err != nil {
-			return errors.Errorf("egressproxy: 已钉拨号地址 %q 不是 IP 字面量", address)
+			return fmt.Errorf("egressproxy: 已钉拨号地址 %q 不是 IP 字面量", address)
 		}
 		if _, ok := allowed[got.Unmap().String()]; !ok {
 			return &BlockedError{Host: host, Port: port, Reason: "拨号地址 " + got.String() + " 不在已检地址集合内（TOCTOU 钉住）"}
@@ -316,7 +318,7 @@ func splitHostPort(hostport string, dflt int) (string, int, error) {
 	if h, p, err := net.SplitHostPort(hostport); err == nil {
 		n, cerr := strconv.Atoi(p)
 		if cerr != nil || n < 1 || n > 65535 {
-			return "", 0, errors.Errorf("端口 %q 非法", p)
+			return "", 0, fmt.Errorf("端口 %q 非法", p)
 		}
 		return h, n, nil
 	}
