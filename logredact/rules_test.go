@@ -116,17 +116,15 @@ func TestRedactWithNilRegexSkipped(t *testing.T) {
 func TestNewRedactorConcurrent(t *testing.T) {
 	red := NewRedactor([]Rule{{Name: "x", Re: regexp.MustCompile(`foo`), Repl: "BAR"}})
 	var wg sync.WaitGroup
-	for i := 0; i < 16; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 50; j++ {
+	for range 16 {
+		wg.Go(func() {
+			for range 50 {
 				if got := red("password=secret foo"); !strings.Contains(got, "BAR") {
 					t.Errorf("并发下结果不对：%q", got)
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

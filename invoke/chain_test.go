@@ -402,14 +402,12 @@ func TestConcurrentDoSharesOneChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	var wg sync.WaitGroup
-	for i := 0; i < 32; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 32 {
+		wg.Go(func() {
 			if _, err := c.Do(context.Background(), Call{Name: "t"}); err != nil {
 				t.Errorf("并发调用不应失败: %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if total != 32 {

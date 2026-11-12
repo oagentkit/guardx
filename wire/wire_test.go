@@ -102,7 +102,7 @@ func TestConcurrentCallsRespondByID(t *testing.T) {
 	const n = 5
 	var got []Request
 	go func() {
-		for i := 0; i < n; i++ {
+		for range n {
 			var req Request
 			if err := ReadFrame(parent.r, &req); err != nil {
 				return
@@ -118,10 +118,8 @@ func TestConcurrentCallsRespondByID(t *testing.T) {
 	client := NewClient(child)
 	results := make([]string, n)
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+	for i := range n {
+		wg.Go(func() {
 			tool := string(rune('a' + i))
 			resp, err := client.Call(context.Background(), tool, "")
 			if err != nil {
@@ -129,10 +127,10 @@ func TestConcurrentCallsRespondByID(t *testing.T) {
 				return
 			}
 			results[i] = resp.Value
-		}(i)
+		})
 	}
 	wg.Wait()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		want := string(rune('a' + i))
 		if results[i] != want {
 			t.Errorf("第 %d 个结果=%q，应为 %q（响应必须按 id 关联，不按到达顺序）", i, results[i], want)
@@ -175,7 +173,7 @@ func TestServerHandlesConcurrentCalls(t *testing.T) {
 		}(tool)
 	}
 	// 两个 handler 都已进入 ⇒ 父侧是并发处理的。
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		select {
 		case <-started:
 		case <-time.After(3 * time.Second):
@@ -502,13 +500,13 @@ func TestClientUniqueIDs(t *testing.T) {
 	})
 	go func() { _ = server.Serve(context.Background()) }()
 	client := NewClient(child)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if _, err := client.Call(context.Background(), "t", ""); err != nil {
 			t.Fatalf("调用失败: %v", err)
 		}
 	}
 	seen := map[string]bool{}
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		id := <-ids
 		if seen[id] {
 			t.Errorf("id 重复: %s", id)

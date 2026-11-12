@@ -15,14 +15,12 @@ func TestBudgetConcurrentFirstChargeSingleState_Issue143(t *testing.T) {
 	b := Budget{MaxCalls: maxCalls} // 零值惰建路径（NewServer/WithBudget 之外的形态）
 	var wg sync.WaitGroup
 	granted := make(chan struct{}, maxCalls*2)
-	for i := 0; i < maxCalls; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range maxCalls {
+		wg.Go(func() {
 			if b.charge(1, 0) {
 				granted <- struct{}{}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(granted)

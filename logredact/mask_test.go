@@ -39,14 +39,12 @@ func TestMaskerUnknownTokenPreserved(t *testing.T) {
 func TestMaskerConcurrent(t *testing.T) {
 	m := NewMasker()
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+	for i := range 8 {
+		wg.Go(func() {
 			m.AddSecret("host-" + string(rune('a'+i)))
 			_ = m.Mask("10.0.0." + string(rune('1'+i)) + " down")
 			_ = m.Restore("«T1» ok")
-		}(i)
+		})
 	}
 	wg.Wait()
 }
