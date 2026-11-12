@@ -3,6 +3,7 @@ package invoke
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"time"
 
 	"github.com/oekit/pkg/errors"
@@ -271,11 +272,12 @@ func NewChain(handler Handler, stages []Stage, opts ...ChainOption) (*Chain, err
 // Stages 返回已装配的环节名（只读快照，调试与自检用）。
 //
 // 刻意**不**返回 Stage 本身或 handler：任何能把执行体交出去的出口，
-// 都是给绕过留的门。
+// 都是给绕过留的门。环节名经 stageName 取（nil/typed-nil 兜底）——这条
+// 只读出口是调试与自检的路径，不得因一环装配漏了（guardx#163）而猝死。
 func (c *Chain) Stages() []string {
 	out := make([]string, len(c.stages))
 	for i, s := range c.stages {
-		out[i] = s.Name()
+		out[i] = stageName(s)
 	}
 	return out
 }
@@ -324,11 +326,11 @@ func evaluateStages(ctx context.Context, stages []Stage, call Call) ([]StageResu
 
 	var trace []StageResult
 	for _, s := range stages {
-		// 环节名先取：环报错/panic 之后仍要能说出「是哪一环」，
-		// 而取名本身对 nil 环节会 panic（见 stageName）。
-		name := stageName(s)
+		// 取名在 runStage 的 recover 面内（guardx#163）：包级承诺是
+		// 「Stage 或 Handler panic 时被 recover」，取名期的 panic 不该是例外。
+		// 环报错/panic 之后仍要能说出「是哪一环」——名字由 runStage 一并回传。
 		st := time.Now()
-		v, err := runStage(ctx, s, call)
+		name, v, err := runStage(ctx, s, call)
 		elapsed := time.Since(st)
 		if err != nil {
 			trace = append(trace, StageResult{Stage: name, Reason: err.Error(), Duration: elapsed})
@@ -346,28 +348,59 @@ func evaluateStages(ctx context.Context, stages []Stage, call Call) ([]StageResu
 	return trace, nil
 }
 
-// stageName 取环节名，对 nil 环节兜底。
+// stageName 取环节名，对 nil 与 typed-nil 环节兜底。
 //
 // nil 环节不是「没有这一环」，而是一环装配漏了：跳过它等于把一次故障静默降级成
 // 不设防；而直接调 s.Name() 又会在 runStage 的 recover **之外**再 panic 一次——
 // 一次接线失误升级成编排进程猝死，正是本包 doc 承诺不发生的事。
+//
+// typed-nil（接口里装着 nil 指针，`var p *MyStage; stages = append(stages, p)`
+// 是 Go 里极常见的接线写法）是同一类装配失误的另一个形态：s == nil 为 false，
+// 直接 s.Name() 在值接收者方法上要解引用 nil 指针 ⇒ panic 逃逸到编排进程
+// （guardx#163）。一并兜成 stageNil——它同样是「一环装配漏了」。
 func stageName(s Stage) string {
-	if s == nil {
+	if isNilStage(s) {
 		return stageNil
 	}
 	return s.Name()
+}
+
+// isNilStage 报告环节是否为 nil 或 typed-nil（接口值非 nil、但装的是 nil 指针）。
+// 只认指针形态：其余 nilable 形态（map/slice/func…）要实现 Stage 得挂方法，
+// 其值接收者方法在 nil 上不产生调用点解引用，取名不会在调用点 panic。
+func isNilStage(s Stage) bool {
+	if s == nil {
+		return true
+	}
+	rv := reflect.ValueOf(s)
+	return rv.Kind() == reflect.Pointer && rv.IsNil()
 }
 
 // Do 执行一次调用：逐环判定，全部通过才到达执行体。
 //
 // 无论结局如何都恰好产出一次留痕。返回的 error 在拒绝时是 *DenyError，
 // 调用方用 Retryable(err) 决定退避与否，不必解析错误文本。
+//
+// 顶层还有一道 recover（guardx#163）：runStage/runHandler 兜住环与执行体，
+// stageName 兜住取名，但任何**未预料**的 panic 仍可能从中间代码逃逸——
+// 逃逸时留痕的 defer 照跑，rec.Err 却还是 nil，一次「崩了」会被伪造成
+// 「未放行、无错误」的正常门禁拒绝，审计面完全失真。这里把最后逃出的
+// panic 也归口成 *DenyError，让留痕的 Err 说真话。
 func (c *Chain) Do(ctx context.Context, call Call) (res Result, err error) {
 	start := time.Now()
 	rec := Record{Call: call}
 	// 用命名返回值捕获收口原因：留痕里少了 Err 的失败记录，读起来和成功记录没区别，
 	// 而「为什么停」正是审计要回答的第一个问题。
 	defer func() {
+		if r := recover(); r != nil {
+			res = Result{}
+			err = &DenyError{
+				Stage:  stageInternal,
+				Tool:   call.Name,
+				Reason: "编排 panic：" + panicReason(r),
+				Cause:  asError(r),
+			}
+		}
 		rec.Err = err
 		rec.Duration = time.Since(start)
 		if c.onRecord != nil {
@@ -398,12 +431,18 @@ func (c *Chain) Do(ctx context.Context, call Call) (res Result, err error) {
 	return res, nil
 }
 
-// runStage 跑一环，把 panic 转成错误。
+// runStage 跑一环（先取名、再判定），把 panic 转成错误，回传环节名。
+//
+// 取名放在 recover 面**之内**（guardx#163）：stageName 兜住了 nil/typed-nil，
+// 但 Name() 自身仍可能 panic——包级承诺是「Stage 或 Handler panic 时被
+// recover」，取名期不该是例外。名字在取名前预置 stageNil：取名自己炸了，
+// 留痕仍能说出「这一环根本没名字」而不是把 panic 再抛出去。
 //
 // recover 在这里而不是散落各处，是本包的核心价值之一：工具执行一旦被搬出主流程
 // （后台服务、worker、子进程），原本包在宿主进程里的 recover 就不在了。
 // 链是唯一还在的进程内边界，所以它必须兜住。
-func runStage(ctx context.Context, s Stage, call Call) (v Verdict, err error) {
+func runStage(ctx context.Context, s Stage, call Call) (name string, v Verdict, err error) {
+	name = stageNil
 	defer func() {
 		if r := recover(); r != nil {
 			v = Verdict{}
@@ -415,18 +454,19 @@ func runStage(ctx context.Context, s Stage, call Call) (v Verdict, err error) {
 			}
 		}
 	}()
+	name = stageName(s)
 	v, err = s.Check(ctx, call)
 	if err != nil {
 		// 阶段报错必须**归口成 DenyError** 再抛出去：裸透传会让调用方拿到一个
 		// 无归属的错误，既不知道是哪一环拒的，也不知道该不该重试——两样都要靠猜。
-		return Verdict{}, &DenyError{
+		return name, Verdict{}, &DenyError{
 			Stage:  stageInternal,
 			Tool:   call.Name,
 			Reason: err.Error(),
 			Cause:  err,
 		}
 	}
-	return v, nil
+	return name, v, nil
 }
 
 // runHandler 跑执行体，把 panic 转成错误（理由同 runStage）。
