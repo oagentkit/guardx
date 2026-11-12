@@ -2,6 +2,27 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.24.6] — 2026-11-12
+
+### 修复(invoke)：typed-nil 环节三层兜底——取名入 recover 面 + 顶层 recover + 留痕带 Err，不再逃逸打死编排进程（#163）
+
+- f1f1a02
+
+### 修复(logredact)：类型化复合形态凭证键整值清空——slice/map/指针/struct 不再下探漏脱（#162）
+
+- 68e55f8
+
+### 修复(permgate)：重定向段 allow 恒失配——未引用化的 > < 不得搭前缀车（#161）
+
+- f2e03f4
+
+- 杂务：go 1.25+ 语言特性纯现代化——计数循环转 range-over-int、干净 wg fan-out 收编 wg.Go（行为零变化）
+
+- rangeint：isAllDigits 字节扫描 for i := range len(seg)；测试计数循环 for i := range N / for range N
+- waitgroupgo：Add(1)/go/Done 干净 fan-out 收编 wg.Go（egressproxy.pump、wire/invoke/logredact/permgate 并发回归测试）
+- 不动项（保守跳过）：permgate splitCommand/hasCommandSubstitution 体内 i++（转义吞字符）；reflect Len()/NumField() 方法界循环；errors.AsType/slices.Backward/strings.Cut 等规则外项
+
+
 ## [v0.24.5] — 2026-11-12
 
 ### 修复(logredact)：reflect.Ptr → reflect.Pointer——go 1.26 工具链 govet inline 检查（弃用别名）
