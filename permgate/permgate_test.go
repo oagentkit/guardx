@@ -508,16 +508,14 @@ func TestAllowForSessionDedup(t *testing.T) {
 func TestConcurrentCheckAndSessionGrant(t *testing.T) {
 	s := &Service{}
 	var wg sync.WaitGroup
-	for i := 0; i < 16; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+	for i := range 16 {
+		wg.Go(func() {
 			if i%2 == 0 {
 				s.AllowForSession("deploy", "")
 			} else {
 				_ = s.Check(ctx, "deploy", nil, ModeReadOnly, Capability{AlwaysAsk: true})
 			}
-		}(i)
+		})
 	}
 	wg.Wait()
 }
@@ -530,11 +528,9 @@ func TestConcurrentUpdateAndCheck(t *testing.T) {
 		ProjectRules: Ruleset{Deny: []Rule{{ToolName: "bash", Content: "rm:*"}}},
 	}
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			for j := 0; j < 50; j++ {
+	for i := range 8 {
+		wg.Go(func() {
+			for range 50 {
 				switch i % 4 {
 				case 0:
 					// 热更新：整体换新值（不原地改切片）
@@ -553,7 +549,7 @@ func TestConcurrentUpdateAndCheck(t *testing.T) {
 					_ = s.SessionAllows()
 				}
 			}
-		}(i)
+		})
 	}
 	wg.Wait()
 	// 热更新后的配置最终可见

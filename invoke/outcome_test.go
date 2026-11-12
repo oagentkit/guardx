@@ -235,13 +235,11 @@ func TestRecordOutcomeSurvivesConcurrentCalls(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+	for i := range n {
+		wg.Go(func() {
 			// 每次调用的工具名唯一 ⇒ 留痕里的结论必须与它自己的那次调用对上。
 			_, _ = c.Do(context.Background(), Call{Name: fmt.Sprintf("tool-%d", i)})
-		}(i)
+		})
 	}
 	wg.Wait()
 

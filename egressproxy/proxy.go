@@ -332,12 +332,10 @@ func splitHostPort(hostport string, dflt int) (string, int, error) {
 // pump 双向搬运（一侧用当前 goroutine，另一侧一条 goroutine），两侧都关半写。
 func pump(client, target net.Conn) {
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		_, _ = io.Copy(target, client)
 		closeWrite(target)
-	}()
+	})
 	_, _ = io.Copy(client, target)
 	closeWrite(client)
 	wg.Wait()

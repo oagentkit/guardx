@@ -348,7 +348,7 @@ func looksLikeExoticIPv4(h string) bool {
 			return false
 		}
 		allDigits := true
-		for i := 0; i < len(seg); i++ {
+		for i := range len(seg) {
 			if seg[i] < '0' || seg[i] > '9' {
 				allDigits = false
 				break
