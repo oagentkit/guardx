@@ -286,11 +286,14 @@ func stringValueOf(val reflect.Value) (string, bool) {
 	return "", false
 }
 
-// maskValueFor 目标元素/字段类型的整值掩码值：string（含命名 string，经
-// Convert 还型）与接口类型可承载 "****"；具体数字/复合类型承载不了（塞
-// 字符串字面量会类型错配），返回 false 由调用方转下探——数字/布尔本体不是
-// 凭据文本，any 形态里它们被掩是「能掩就掩」，类型化形态里掩不了是类型
-// 系统的硬边界，不是承诺松动。
+// maskValueFor 目标元素/字段类型的整值打码值：string（含命名 string，经
+// Convert 还型）与接口类型承载 "****"；复合类型（slice/array/map/pointer/
+// struct）承载不了字符串字面量，但**凭证键命中后不放弃处理**（guardx#162）
+// ——返回同类型空值清掉原文（slice 空切片、map 空 map、pointer nil、
+// array/struct 零值），兑现「键表内的键，值必被打码」而不是转下探把形状
+// 规则认不出的随机口令原样放行。数字/布尔返回 false 由调用方转下探：本体
+// 不是凭据文本，any 形态里它们被掩是「能掩就掩」，类型化形态里掩不了是
+// 类型系统的硬边界，不是承诺松动（#162 沿用本免责，不扩大改动面）。
 func maskValueFor(t reflect.Type) (reflect.Value, bool) {
 	switch t.Kind() {
 	case reflect.String:
@@ -300,6 +303,12 @@ func maskValueFor(t reflect.Type) (reflect.Value, bool) {
 		return reflect.ValueOf(maskLiteral).Convert(t), true
 	case reflect.Interface:
 		return reflect.ValueOf(maskLiteral), true
+	case reflect.Slice:
+		return reflect.MakeSlice(t, 0, 0), true
+	case reflect.Map:
+		return reflect.MakeMap(t), true
+	case reflect.Pointer, reflect.Array, reflect.Struct:
+		return reflect.Zero(t), true
 	}
 	return reflect.Value{}, false
 }

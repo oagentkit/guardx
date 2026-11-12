@@ -58,6 +58,11 @@
 // 命令替换（#144）：段内含未引用化的 `$(`、反引号、`${` 时该段 allow 恒失配
 // （单引号内为字面；双引号内照样执行/展开，不豁免）——替换体的真实命令
 // 运行期才展开，字面前缀核对不了它，宁可落 ask（hasCommandSubstitution）。
+// 重定向（#161）：段内含未加引号包裹的 `>` `<`（覆盖 `>>` `2>` `2>&1` `<<` 等）
+// 时该段 allow 恒失配——重定向目标路径不在任何规则的审视面内，
+// `git status > /etc/passwd` 不得搭 `git status:*` 的车放行；与替换体守门
+// 语义有一处不同：单、双引号内都是字面（双引号内的 `>` 不构成重定向，
+// `git status "a>b"` 不得误伤），反斜杠转义 `\>` 亦为字面（hasRedirect）。
 package permgate
 
 import (
@@ -758,15 +763,16 @@ func matchRuleContent(content string, faces []subjectFace, pol Behavior) bool {
 
 // faceMatch 单面命中：Allow 全段命中（universal），Deny/Ask 任一段命中
 // （existential）——两个方向都是各自的保守侧。
-// Allow 侧另有一条替换体守门（guardx#144）：段内含命令替换/参数展开面
-// （$(`、反引号、`${`）时该段恒失配——allow 前缀按字面文本核对，替换体的
-// 真实命令在运行期才展开（`git status $(curl evil)` 搭 `git status:*` 的车
-// 曾原样放行，与「拆不动的形态宁可失配」的包注释承诺相反；deny/ask 不受
-// 影响，仍按既有保守语义）。
+// Allow 侧另有两道守门（guardx#144/#161）：段内含命令替换/参数展开面
+// （$(`、反引号、`${`）或未加引号包裹的重定向操作符（`>` `<`）时该段恒失配
+// ——allow 前缀按字面文本核对，替换体的真实命令在运行期才展开、重定向目标
+// 路径不在规则审视面内（`git status $(curl evil)` / `git status > /etc/passwd`
+// 搭 `git status:*` 的车曾原样放行，与「拆不动的形态宁可失配」的包注释承诺
+// 相反；deny/ask 不受影响，仍按既有保守语义）。
 func faceMatch(face subjectFace, content, prefix string, isPrefix bool, pol Behavior) bool {
 	if pol == Allow {
 		for _, seg := range face {
-			if hasCommandSubstitution(seg) || !segMatch(content, prefix, isPrefix, seg) {
+			if hasCommandSubstitution(seg) || hasRedirect(seg) || !segMatch(content, prefix, isPrefix, seg) {
 				return false
 			}
 		}
@@ -815,6 +821,49 @@ func hasCommandSubstitution(seg string) bool {
 		case c == '$' && i+1 < len(seg) && (seg[i+1] == '(' || seg[i+1] == '{'):
 			return true
 		case c == '`':
+			return true
+		}
+	}
+	return false
+}
+
+// hasRedirect 报告段内是否存在未加引号包裹的重定向操作符（`>` `<`——guardx#161
+// 的 allow 守门；`>>` `2>` `2>&1` `>|` `<<` 均由这两个字符覆盖，`&>` 里的 `&`
+// 已被 splitCommand 拆段、段内只剩 `>`）。扫描口径——与 hasCommandSubstitution
+// 有一处刻意不同，勿照抄：
+//   - 单引号内是字面（不计数）——shell 语义，`'a>b'` 原样传递；
+//   - 双引号内也是字面（不计数）——双引号内的 `>` 不构成重定向；而 `$(` 在
+//     双引号内照样执行，所以那边不能豁免。若照抄替换体守门的双引号口径，
+//     `git status "a>b"` 这类正常形态会被误伤（落 ask）；
+//   - 反斜杠转义的 `\>`、`\<` 为字面（不计数）。
+//
+// 段内命中 ⇒ 该段 allow 恒失配（落 ask）：重定向目标路径完全不在规则审视面内，
+// `git status > /etc/passwd` 搭 `git status:*` 的车等于「往任意路径写任意内容」。
+// deny/ask 侧不调用本函数，仍按既有保守语义。
+func hasRedirect(seg string) bool {
+	inSingle := false
+	inDouble := false
+	for i := 0; i < len(seg); i++ {
+		c := seg[i]
+		switch {
+		case inSingle:
+			if c == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			switch c {
+			case '\\':
+				i++ // 双引号内反斜杠转义下一字符（主要为了 \" 不提前收尾）
+			case '"':
+				inDouble = false
+			}
+		case c == '\\':
+			i++ // 转义下一字符（\> 是字面）
+		case c == '\'':
+			inSingle = true
+		case c == '"':
+			inDouble = true
+		case c == '>' || c == '<':
 			return true
 		}
 	}
