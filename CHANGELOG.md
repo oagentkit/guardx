@@ -2,7 +2,7 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
-## [v0.24.6] — 2026-11-12
+## [v0.24.6] — 2026-11-13
 
 ### 修复(invoke)：typed-nil 环节三层兜底——取名入 recover 面 + 顶层 recover + 留痕带 Err，不再逃逸打死编排进程（#163）
 
