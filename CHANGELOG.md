@@ -2,6 +2,69 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.25.0] — 2026-11-13
+
+### 重构：跨 org Errorf 迁移收口——依赖地板抬到 oekit/pkg v0.48.0，强制下游同迁（BREAKING）
+
+oekit/pkg v0.48.0 删除了 errors.Errorf（跨 org 迁移：Errorf 语义与 fmt.Errorf
+完全重合，双入口只留标准库一个）。本仓全量复扫：仓内非测试代码的 .Errorf(
+调用点**已经清零**（wire/egress/sandbox 等路径早就是 fmt.Errorf；测试里的
+t.Errorf 是 testing 框架的，不在迁移范围）——errors 包的使用面收敛为
+errors.New / Wrap / Is / As（oekit/pkg/errors 与标准库互补的部分）。
+本 PR 把 go.mod 地板从 v0.47.1 抬到 v0.48.0。
+## BREAKING：下游要做什么
+- 地板抬高对下游是**隐式破坏性变更**：不跑 go mod tidy 的下游会构建红
+  （go: updates to go.mod needed）——升级本仓到 v0.25.0 后**跑一次 go mod tidy**。
+- 下游若自己还在用 `github.com/oekit/pkg/errors` 的 Errorf：迁移成
+  `fmt.Errorf`（%w 语义保持——`errors.Errorf("…: %w", err)` →
+  `fmt.Errorf("…: %w", err)`，逐字面替换即可）；errors.New/Wrap/Is/As 不受影响。
+- import 清理：文件里若不再用到 oekit/pkg/errors 的其它符号，删掉该 import。
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.47.1` | `v0.48.0` |
+## 兼容性实测
+提交前跑完 `go build` / `go vet` / `go test ./...`（全绿）与
+`go mod tidy -diff`（无漂移）⇒ 改动只影响依赖版本，零行为差异。
+
+- 杂务(modernize)：二阶段收编 go fix 规则外建议（matrix-tools#213 guardx 分片）
+
+- errors.As → errors.AsType：egress 6 处（client/egress/policy/redirect_test）
+- slices.Backward：wire/wire_test.go 逆序回帧循环
+- reflect.TypeFor：logredact/jsonredact.go 4 个类型变量、invoke/evaluate_test.go 签名断言
+- strings.Cut：logredact jsonFieldName、permgate structFieldString 的 tag 取名
+- strings.SplitSeq：fence/escape_test.go、sandbox/fsfence.go 路径分段遍历
+- 跳过（不在 #213 清单）：sandbox_test rangeint、fsfence hasExplicitDotDot 的 slices.Contains 改写
+- 门禁：gofmt 净、go build/vet -race test 全绿（go1.26 工具链亦 vet 通过）、golangci-lint 0 issues
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.47.1
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.46.0` | `v0.47.1` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.47.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.46.0` | `v0.47.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
 ## [v0.24.6] — 2026-11-13
 
 ### 修复(invoke)：typed-nil 环节三层兜底——取名入 recover 面 + 顶层 recover + 留痕带 Err，不再逃逸打死编排进程（#163）
