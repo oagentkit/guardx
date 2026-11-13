@@ -279,7 +279,7 @@ func (m *Masker) walkReflect(v any, kind walkKind, depth int) any {
 			out = reflect.New(rv.Type()).Elem()
 			out.Set(rv)
 		}
-		for i := 0; i < rv.Len(); i++ {
+		for i := range rv.Len() {
 			out.Index(i).Set(m.walkAssignable(rv.Index(i), rv.Type().Elem(), kind, depth+1))
 		}
 		return out.Interface()
@@ -290,7 +290,7 @@ func (m *Masker) walkReflect(v any, kind walkKind, depth int) any {
 		t := rv.Type()
 		out := reflect.New(t).Elem()
 		out.Set(rv) // 先整体拷贝再覆写下探结果：未导出字段与无需处理的原样保留
-		for i := 0; i < t.NumField(); i++ {
+		for i := range t.NumField() {
 			f := t.Field(i)
 			if !f.IsExported() {
 				continue

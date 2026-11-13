@@ -363,7 +363,7 @@ func walkReflectSeq(rv reflect.Value, payload map[string]struct{}, opts ValueOpt
 		out = reflect.New(rv.Type()).Elem()
 		out.Set(rv)
 	}
-	for i := 0; i < rv.Len(); i++ {
+	for i := range rv.Len() {
 		out.Index(i).Set(walkAssignable(rv.Index(i), et, payload, opts, depth+1))
 	}
 	return out.Interface()
@@ -384,7 +384,7 @@ func walkReflectStruct(rv reflect.Value, payload map[string]struct{}, opts Value
 	t := rv.Type()
 	out := reflect.New(t).Elem()
 	out.Set(rv)
-	for i := 0; i < t.NumField(); i++ {
+	for i := range t.NumField() {
 		f := t.Field(i)
 		if !f.IsExported() {
 			continue
