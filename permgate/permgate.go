@@ -610,7 +610,7 @@ func structSubjects(rv reflect.Value, keys []string, depth int) []subjectFace {
 func structFieldString(rv reflect.Value, key string, depth int) (string, bool) {
 	norm := normalizeFieldName(key)
 	t := rv.Type()
-	for i := 0; i < t.NumField(); i++ {
+	for i := range t.NumField() {
 		f := t.Field(i)
 		if f.Anonymous && f.Type.Kind() == reflect.Struct {
 			if s, ok := structFieldString(rv.Field(i), key, depth-1); ok {
