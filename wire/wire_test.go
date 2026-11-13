@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -110,8 +111,8 @@ func TestConcurrentCallsRespondByID(t *testing.T) {
 			got = append(got, req)
 		}
 		// 逆序回响应。
-		for i := len(got) - 1; i >= 0; i-- {
-			_ = WriteFrame(parent.w, Response{V: Version, ID: got[i].ID, OK: true, Value: got[i].Tool})
+		for _, g := range slices.Backward(got) {
+			_ = WriteFrame(parent.w, Response{V: Version, ID: g.ID, OK: true, Value: g.Tool})
 		}
 	}()
 

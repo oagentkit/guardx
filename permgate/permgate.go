@@ -623,7 +623,7 @@ func structFieldString(rv reflect.Value, key string, depth int) (string, bool) {
 		}
 		name := f.Name
 		if tag, ok := f.Tag.Lookup("json"); ok {
-			if n := strings.Split(tag, ",")[0]; n != "" {
+			if n, _, _ := strings.Cut(tag, ","); n != "" {
 				if n == "-" {
 					continue
 				}

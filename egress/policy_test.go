@@ -36,8 +36,7 @@ func TestPolicyNamedSurfaces(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s：%s 应被拒", c.name, c.host)
 		}
-		var blocked *BlockedError
-		if !errors.As(err, &blocked) {
+		if _, ok := errors.AsType[*BlockedError](err); !ok {
 			t.Fatalf("%s：%s 的拒绝原因应是 *BlockedError，实际 %T", c.name, c.host, err)
 		}
 	}

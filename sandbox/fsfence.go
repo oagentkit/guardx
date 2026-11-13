@@ -182,7 +182,7 @@ func (f *FSFence) resolveDegrade(abs string) (string, error) {
 		real, err := filepath.EvalSymlinks(dir)
 		if err == nil {
 			cur := real
-			for _, seg := range strings.Split(filepath.ToSlash(tail), "/") {
+			for seg := range strings.SplitSeq(filepath.ToSlash(tail), "/") {
 				if seg == "" {
 					continue
 				}

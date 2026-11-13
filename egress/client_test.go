@@ -33,8 +33,7 @@ func TestNewClientBlocksLoopbackDial(t *testing.T) {
 		_ = resp.Body.Close()
 		t.Fatal("PublicOnly 应拦住回环拨号")
 	}
-	var blocked *BlockedError
-	if !errors.As(err, &blocked) {
+	if _, ok := errors.AsType[*BlockedError](err); !ok {
 		t.Fatalf("拒绝原因应是 *BlockedError，实际 %T：%v", err, err)
 	}
 	if hits != 0 {
@@ -54,8 +53,7 @@ func TestNewClientPrivateNoLoopbackStillBlocksLoopback(t *testing.T) {
 		_ = resp.Body.Close()
 		t.Fatal("PrivateNoLoopback 应拒回环")
 	}
-	var blocked *BlockedError
-	if !errors.As(err, &blocked) {
+	if _, ok := errors.AsType[*BlockedError](err); !ok {
 		t.Fatalf("拒绝原因应是 *BlockedError，实际 %T：%v", err, err)
 	}
 }
@@ -167,8 +165,7 @@ func TestNewClientGuardsRedirectTarget(t *testing.T) {
 		_ = resp.Body.Close()
 		t.Fatal("重定向目标（云元数据地址）应被拨号层拦住")
 	}
-	var blocked *BlockedError
-	if !errors.As(err, &blocked) {
+	if _, ok := errors.AsType[*BlockedError](err); !ok {
 		t.Fatalf("拒绝原因应是 *BlockedError，实际 %T：%v", err, err)
 	}
 	mu.Lock()
@@ -253,8 +250,7 @@ func TestNewClientGuardsLegacyDialTLS(t *testing.T) {
 		_ = resp.Body.Close()
 		t.Fatal("PublicOnly 应拦住回环的 HTTPS 拨号")
 	}
-	var blocked *BlockedError
-	if !errors.As(err, &blocked) {
+	if _, ok := errors.AsType[*BlockedError](err); !ok {
 		t.Fatalf("拒绝原因应是 *BlockedError，实际 %T：%v", err, err)
 	}
 	mu.Lock()

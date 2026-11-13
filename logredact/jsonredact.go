@@ -131,10 +131,10 @@ func redactWalk(v any, payload map[string]struct{}, opts ValueOptions) any {
 const maxWalkDepth = 64
 
 var (
-	stringType       = reflect.TypeOf("")
-	jsonNumberType   = reflect.TypeOf(json.Number(""))
-	mapStringAnyType = reflect.TypeOf(map[string]any(nil))
-	sliceAnyType     = reflect.TypeOf([]any(nil))
+	stringType       = reflect.TypeFor[string]()
+	jsonNumberType   = reflect.TypeFor[json.Number]()
+	mapStringAnyType = reflect.TypeFor[map[string]any]()
+	sliceAnyType     = reflect.TypeFor[[]any]()
 )
 
 // isCredentialKeyName 键名判定：内置词表 + 调用方回调叠加（回调只加不减，
@@ -420,7 +420,7 @@ func walkReflectStruct(rv reflect.Value, payload map[string]struct{}, opts Value
 // ValueOptions.IsCredentialKey 回调都用这个名字。
 func jsonFieldName(f reflect.StructField) string {
 	if tag, ok := f.Tag.Lookup("json"); ok {
-		if n := strings.Split(tag, ",")[0]; n != "" && n != "-" {
+		if n, _, _ := strings.Cut(tag, ","); n != "" && n != "-" {
 			return n
 		}
 	}
