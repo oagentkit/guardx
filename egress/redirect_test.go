@@ -24,8 +24,7 @@ func mustReq(t *testing.T, raw string) *http.Request {
 // 这条钉的正是「写面只判首跳」留下的洞：首跳是合法公网域名，302 到 169.254.169.254。
 func TestCheckRedirectBlocksPrivateTarget(t *testing.T) {
 	err := PublicOnly.CheckRedirect(mustReq(t, "http://169.254.169.254/latest/meta-data"), nil)
-	var blocked *BlockedError
-	if !errors.As(err, &blocked) {
+	if _, ok := errors.AsType[*BlockedError](err); !ok {
 		t.Fatalf("云元数据目标应被拒且原因是 *BlockedError，实际 %T：%v", err, err)
 	}
 }
@@ -82,8 +81,7 @@ func TestCheckRedirectWiredIntoClient(t *testing.T) {
 		_ = resp.Body.Close()
 		t.Fatal("跟随重定向应被 CheckRedirect 拒掉")
 	}
-	var blocked *BlockedError
-	if !errors.As(err, &blocked) {
+	if _, ok := errors.AsType[*BlockedError](err); !ok {
 		t.Fatalf("拒绝原因应是 *BlockedError，实际 %T：%v", err, err)
 	}
 }

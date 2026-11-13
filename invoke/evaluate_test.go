@@ -229,14 +229,14 @@ func TestEvaluateStagesNilRingFailsClosed(t *testing.T) {
 // 那与本包的不变量直接冲突。签名里两者都没有，这条不变量才成立
 // （与 TestStagesDoesNotLeakHandler 同源）。
 func TestEvaluateStagesSignatureExposesNothing(t *testing.T) {
-	errIface := reflect.TypeOf((*error)(nil)).Elem()
-	ctxIface := reflect.TypeOf((*context.Context)(nil)).Elem()
+	errIface := reflect.TypeFor[error]()
+	ctxIface := reflect.TypeFor[context.Context]()
 	got := reflect.TypeOf(EvaluateStages)
 
 	if got.NumOut() != 1 || got.Out(0) != errIface {
 		t.Fatalf("EvaluateStages 只能回 error，实得返回 %v", got)
 	}
-	wantIn := []reflect.Type{ctxIface, reflect.TypeOf([]Stage(nil)), reflect.TypeOf(Call{})}
+	wantIn := []reflect.Type{ctxIface, reflect.TypeFor[[]Stage](), reflect.TypeFor[Call]()}
 	if got.NumIn() != len(wantIn) {
 		t.Fatalf("入参应为 (ctx, 环表, 调用)，实得 %v", got)
 	}

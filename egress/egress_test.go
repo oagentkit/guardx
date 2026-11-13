@@ -136,8 +136,7 @@ func TestCheckSchemeAllowlist(t *testing.T) {
 			t.Errorf("%s 非 http(s) scheme 应阻断", u)
 			continue
 		}
-		var be *BlockedError
-		if !errors.As(Check(u), &be) {
+		if _, ok := errors.AsType[*BlockedError](Check(u)); !ok {
 			t.Errorf("%s 应为 BlockedError", u)
 		}
 		if err := CheckWith(u, Policy{}); err == nil {
