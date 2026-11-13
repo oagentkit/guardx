@@ -2,6 +2,13 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.25.1] — 2026-11-14
+
+### 重构(logredact,permgate)：for 计数循环 → range over int（1.22）
+
+reflect 遍历(rv.Len()/t.NumField())5 处改 range over int;
+shell 扫描游标循环(体内推进 i)保持不动
+
 ## [v0.25.0] — 2026-11-13
 
 ### 重构：跨 org Errorf 迁移收口——依赖地板抬到 oekit/pkg v0.48.0，强制下游同迁（BREAKING）
