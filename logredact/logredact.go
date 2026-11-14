@@ -59,6 +59,13 @@ type Rule struct {
 	// hint——整段 hint 的尾 4 字符落在凭据上，正是本注释警告的陷阱本身
 	// （guardx#69）：宁可丢线索，不留尾巴。
 	Group int
+	// Guard 可选的命中守卫（guardx#187）：收到本次命中的全文，返回 false 时
+	// 该次命中**原样保留**（不替换）。RE2 无环视（先行/后行断言都没有），
+	// 「命中了但按上下文豁免」的规则只能经替换函数表达——本字段就是它的
+	// 公开形态，两种 Style 下都生效。nil = 无守卫。内置 bare-userinfo 规则
+	// 用它豁免 mailto: 形态与 scheme:// 干扰（见该规则注释）；扩展规则同样
+	// 可用（守卫里自行解析命中文本，组结构归宿主）。
+	Guard func(match string) bool
 }
 
 // builtinRules 内置规则表（顺序即应用顺序）。
@@ -151,6 +158,45 @@ var builtinRules = []Rule{
 		Name: "url-embedded-credential",
 		Re:   regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9+.-]*)://([^\s:@/]*):([^\s@]+)@`),
 		Repl: "$1://$2:****@",
+	},
+	{
+		// 裸 userinfo 凭据（guardx#187）：无 scheme 的 `user:pass@host` 形态
+		// （DSN/连接串——`connection=user:secretpw@10.0.0.9:5432/app`）。
+		// url-embedded-credential 按 userinfo **文法**锚定在 `:scheme//` 之后，
+		// 这类形态全链路不命中、凭据整串落盘；本规则补裸面。位置必须紧随其
+		// 后（同族相邻）：scheme:// 形态先由文法规则处理，本规则在已掩文本上
+		// 不再命中（见 guard 豁免 2 与左边界排除 /）。
+		//
+		// 形态锚定（issue 规格的 `[A-Za-z][\w.+-]*:pass@`）加三道误伤裁决：
+		//   1. 用户段首字符 [A-Za-z]——时间戳 `12:34@`（数字开头）整体失配；
+		//   2. 左边界 (^|[^/]) 并**消耗**之（Repl 原样回填）——`a/b:c@` 类路径
+		//      内冒号（冒号后无凭据体）失配。RE2 非锚定起配下用户段可从词中段
+		//      起配（`/objects/user:token@` 以 user="ser" 命中、边界字符回填
+		//      重构原文），路径中段嵌入**完整凭据样式**（`段:段@`，冒号后有体）
+		//      照样掩——over-mask 方向，该形态本身即凭据样式。已知代价：相邻
+		//      两条裸 userinfo 零分隔时第二条失配（首条已消耗边界字符，RE2 无
+		//      后行断言补不回）——该形态在真实日志里不存在，首条照样掩；
+		//   3. Guard 豁免（见 bareUserinfoGuard）：mailto: 的冒号后是邮箱本地
+		//      部不是凭据；pass 段以 `//` 起头是 scheme:// 分隔符（文法规则已
+		//      掩文本上不再咬结构——`https://user:****@host` 的 "https:" 候选
+		//      匹配经此豁免原样保留）；`:` 后紧跟 `<` 是尖括号地址形态
+		//      （Message-ID/References 邮件家族）。已知代价：密码以 `<` 开头的
+		//      裸形态被豁免——邮件系日志里尖括号地址高频、裸凭据密码以 `<`
+		//      开头且无 scheme 的形态实际不存在（凭据侧走 %-编码/引号/scheme
+		//      形态），over/under-mask 两害相权取此。
+		// 密码段 [^\s@]+ 与 url-embedded 同口径：允许 `/`（#179：密码含 /
+		// 的连接串 user:p/ass@host:5432）与 `:`（user:pa:ss@ 多段密码）。
+		// 刻意**不**掩「纯用户名无密码」形态（`ssh git@host`）：用户名不是
+		// 凭据（与 url-embedded 同款裁决）。已知代价：字母开头的时间前缀
+		// （ISO `T12:34@`）会命中——真凭据面在先，over-mask 是安全方向。
+		// kv 词表刻意**不**收 connection：它是中性遥测词（connection=5 /
+		// connection_timeout=30ms / connections 池指标），收词表整值打码 =
+		// 计量面数据损坏（#52 同款）；凭据面由本规则按**值形态**兜住，与
+		// 键名无关。
+		Name:  "bare-userinfo-credential",
+		Re:    regexp.MustCompile(`(^|[^/])([A-Za-z][\w.+-]*):([^\s@]+)@`),
+		Repl:  "$1$2:****@",
+		Guard: bareUserinfoGuard,
 	},
 	{
 		// 方案词/jwt/vendor 三组锚定**凭据体自身**（RFC 7235 方案词后的凭据
@@ -323,6 +369,29 @@ var builtinRules = []Rule{
 	},
 }
 
+// bareUserinfoGuard 裸 userinfo 规则的命中守卫（guardx#187，豁免依据见
+// builtinRules 该规则的注释）。match 是含左边界的完整命中文本；重解析取
+// 组失败时保守放行替换（fail-closed）。
+func bareUserinfoGuard(match string) bool {
+	sub := bareUserinfoRe.FindStringSubmatch(match)
+	if sub == nil {
+		return true
+	}
+	if strings.EqualFold(sub[2], "mailto") {
+		return false // RFC 6068：mailto: 冒号后是邮箱本地部，不是凭据
+	}
+	if strings.HasPrefix(sub[3], "//") {
+		return false // scheme:// 分隔符——本规则不得吞 URL 结构（文法规则的地盘）
+	}
+	if strings.HasPrefix(sub[3], "<") {
+		return false // 尖括号地址形态（Message-ID / References 邮件家族）
+	}
+	return true
+}
+
+// bareUserinfoRe 裸 userinfo 规则的编译源（Guard 重解析共用同一份）。
+var bareUserinfoRe = regexp.MustCompile(`(^|[^/])([A-Za-z][\w.+-]*):([^\s@]+)@`)
+
 // Rules 返回内置规则表的**副本**。
 //
 // 返回副本而不是共享切片：调用方要能自由改自己的表（追加规则、改顺序），
@@ -403,7 +472,20 @@ func applyRule(s string, r Rule) string {
 	}
 	if r.Style == MaskStyleHint {
 		return r.Re.ReplaceAllStringFunc(s, func(m string) string {
+			if r.Guard != nil && !r.Guard(m) {
+				return m // 命中守卫豁免：原样保留（guardx#187）
+			}
 			return hintMatch(r, m)
+		})
+	}
+	if r.Guard != nil {
+		return r.Re.ReplaceAllStringFunc(s, func(m string) string {
+			if !r.Guard(m) {
+				return m // 命中守卫豁免：原样保留（guardx#187）
+			}
+			// 命中串 m 恰是 r.Re 的一次完整匹配——在 m 内按 Repl 展开即得
+			// 该次命中的替换结果（$N 引用经子匹配求值）。
+			return r.Re.ReplaceAllString(m, r.Repl)
 		})
 	}
 	return r.Re.ReplaceAllString(s, r.Repl)

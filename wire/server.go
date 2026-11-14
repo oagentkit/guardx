@@ -306,7 +306,22 @@ func (s *Server) execute(ctx context.Context, req Request) execResult {
 		} else {
 			resp.Error = fmt.Sprintf("调用被父侧取消: %v", ctx.Err())
 		}
-		_ = s.writeFrame(resp)
+		// 超时/取消回帧同为出站字节，先入账再回帧（guardx#188）：本路径此前
+		// writeFrame 直写、未经 charge——「所有出站字节必记账」的不变量多了
+		// 一个未登记例外。文案今天由父侧固定生成（不含对端可控内容），但
+		// 不变量不该靠文案善良好使——后续谁往里拼对端回显，账必须在。
+		// 与 serveOne 同一 charge 口径（Value/Error 两段之和）；超限拒付整帧，
+		// 回与 serveOne 同款「输出字节配额已用尽」帧（拒付帧本身不入账——
+		// charge 已拒绝，无账可记，父侧固定文案）。
+		if !s.budget.charge(0, len(resp.Value)+len(resp.Error)) {
+			_ = s.writeFrame(Response{
+				V: Version, ID: req.ID, OK: false,
+				Kind:  string(toolfail.ClassRateLimited),
+				Error: "输出字节配额已用尽",
+			})
+		} else {
+			_ = s.writeFrame(resp)
+		}
 		<-done // 等 handler goroutine 退出（ctx 已取消，规范 handler 会退；不退的占住名额，见上）。
 		return execResult{written: true}
 	}

@@ -14,7 +14,7 @@ oagentkit 模块矩阵的 **tier 0 安全层**。与矩阵其余仓的关系：
 本仓是 **1 个 Go module、1 条版本线、零第三方依赖**：
 
 ```
-github.com/oagentkit/guardx → fence injectband logredact egress egressproxy permgate invoke toolfail sandbox wire
+github.com/oagentkit/guardx → fence injectband logredact egress egressproxy permgate rbac invoke toolfail sandbox wire
 ```
 
 主模块**零第三方依赖**：只想脱敏的下游 `import "github.com/oagentkit/guardx/logredact"`
@@ -41,6 +41,7 @@ github.com/oagentkit/guardx → fence injectband logredact egress egressproxy pe
 | 包 | 行数 | 职责 |
 |---|---|---|
 | `permgate` | ~500 | 能力门禁：`Capability` / `Rule` / `Ruleset` / `Decision`。判定链以 deny 优先于 approval，输出可审计的裁决结构 |
+| `rbac` | ~470 | **角色能力矩阵机制**（机制 only，词表宿主注入）：`Matrix`（角色→能力集）+ `Can` 查表（矩阵外无能力，fail-closed）+ 只读档**由矩阵推导**（不硬编码角色名；写面词表未声明 ⇒ 全禁）+ `Snapshot` 授权面指纹（确定性序列化）+ `Lint`「矩阵不得装饰化」骨架（消费点回调宿主注入，未注入 = 逐词报疑点）。与 permgate 分工：permgate 裁「这次调用要不要人确认」（调用面），rbac 裁「这个角色有没有这个能力」（角色面） |
 | `invoke` | ~300 | 工具调用统一契约 + 不可绕过的调用链（构造即保证）。**框架无关**：不携带 eino / policy 的类型 |
 | `logredact` | ~477 | 凭据脱敏：日志与异常面在落盘/外发前的凭据抹除 |
 | `egress` | ~475 | 出站 URL 守卫（SSRF）：**host** 逐 IP 过策略（回环/RFC1918/链路本地/CGNAT/保留段），**域名直接放行**。⚠️ **不解析 DNS、不校验 scheme** —— 见下方「已知的误用陷阱」 |
