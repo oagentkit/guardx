@@ -11,9 +11,14 @@ import "strings"
 // 前提：下游渲染器仍需自行 sanitize 裸 HTML（本包不处理 <img>/<script> 等标签）。
 func EscapeUntrusted(s string) string {
 	// 行终止符归一（第九轮审计：CommonMark 把 \r 视为行终止符——`好评\r# 标题`
-	// 在渲染器侧是两行，按 \n 切分则是一行，行首判定被绕过即注入面）
+	// 在渲染器侧是两行，按 \n 切分则是一行，行首判定被绕过即注入面；
+	// guardx#184：U+2028/U+2029（行/段分隔符）在部分渲染器同样断行——同仓
+	// websearch.sanitizeURL 的控制字符口径已收编这两个字符，行首中和的绕过
+	// 形态与其同级，一并归一成 \n）
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
+	s = strings.ReplaceAll(s, "\u2028", "\n")
+	s = strings.ReplaceAll(s, "\u2029", "\n")
 
 	if s == "" {
 		return s

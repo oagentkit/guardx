@@ -828,3 +828,61 @@ func TestServerCloseStopsServing(t *testing.T) {
 		t.Error("Close 后新调用必须失败（连接已断，停收即停执行）")
 	}
 }
+
+// TestServerMaxBytesCountsErrorFace 回归（guardx#185）：失败帧的 Error 同为
+// 响应输出面，此前只有 Value 入账——handler 反复返回巨型 Error（err.Error()
+// 可内嵌工具输出片段、单帧上限 16MB）即可绕开 MaxBytes 预算持续推给子进程，
+// charge 的「超限拒付整帧」在 Error 面从未生效。
+func TestServerMaxBytesCountsErrorFace(t *testing.T) {
+	child, parent, cleanup := channelPair()
+	defer cleanup()
+
+	big := strings.Repeat("e", 1000)
+	server := NewServer(parent, func(ctx context.Context, req Request) (Response, error) {
+		return Response{OK: false, Kind: string(toolfail.ClassPermanent), Error: big}, nil
+	}, WithBudget(Budget{MaxBytes: 100}))
+	go func() { _ = server.Serve(context.Background()) }()
+
+	if err := WriteFrame(child.w, Request{V: Version, ID: "e-1", Tool: "t"}); err != nil {
+		t.Fatalf("写帧失败: %v", err)
+	}
+	var resp Response
+	if err := ReadFrame(child.r, &resp); err != nil {
+		t.Fatalf("读帧失败: %v", err)
+	}
+	if resp.OK || !strings.Contains(resp.Error, "输出字节") {
+		t.Fatalf("巨型 Error 应被字节预算拒付整帧，实得 %+v", resp)
+	}
+	// 超限的那次不落账：字节账应停在 0。
+	if _, used := server.budget.Used(); used != 0 {
+		t.Errorf("已用字节=%d，应为 0（超限那次不记账）", used)
+	}
+}
+
+// TestServerMaxBytesChargesSmallError Error 面字节正常入账、跨调用累计到线即拦
+// （guardx#185；与 Value 面的累计口径同参）。
+func TestServerMaxBytesChargesSmallError(t *testing.T) {
+	child, parent, cleanup := channelPair()
+	defer cleanup()
+
+	server := NewServer(parent, func(ctx context.Context, req Request) (Response, error) {
+		return Response{OK: false, Kind: string(toolfail.ClassPermanent), Error: "12345"}, nil // 每次 5 字节
+	}, WithBudget(Budget{MaxBytes: 10}))
+	go func() { _ = server.Serve(context.Background()) }()
+
+	for i, wantOver := range []bool{false, false, true} {
+		if err := WriteFrame(child.w, Request{V: Version, ID: fmt.Sprintf("e-%d", i), Tool: "t"}); err != nil {
+			t.Fatalf("第 %d 帧写失败: %v", i, err)
+		}
+		var resp Response
+		if err := ReadFrame(child.r, &resp); err != nil {
+			t.Fatalf("第 %d 帧读失败: %v", i, err)
+		}
+		if over := strings.Contains(resp.Error, "输出字节"); over != wantOver {
+			t.Fatalf("第 %d 次：超限=%v，应为 %v（Error 面累计 %d 字节，上限 10）", i, over, wantOver, (i+1)*5)
+		}
+	}
+	if _, used := server.budget.Used(); used != 10 {
+		t.Errorf("已用字节=%d，应为 10（Error 面入账）", used)
+	}
+}

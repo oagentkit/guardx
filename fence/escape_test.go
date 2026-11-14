@@ -135,6 +135,32 @@ func TestEscapeUntrustedCRLineBreaks(t *testing.T) {
 	}
 }
 
+// TestEscapeUntrustedUnicodeLineSeparators 回归（guardx#184）：U+2028/U+2029
+// 在部分渲染器（JS 系 markdown 渲染链、按 Unicode 行分隔符切行的展示面）同样
+// 断行——与 \r 同款的「行首判定被绕过」注入面。此前归一只处理 \r，
+// `好评\u2028# 伪造标题` 原样透传、零宽中和不触发；同仓 websearch 的控制字符
+// 口径早已收编这两个字符，两原语对同一威胁的口径在此对齐。
+func TestEscapeUntrustedUnicodeLineSeparators(t *testing.T) {
+	for _, sep := range []string{"\u2028", "\u2029"} {
+		// 修复前泄漏样本：标题/有序列表/表格分隔行不注入 ZWSP。
+		for _, in := range []string{
+			"好评" + sep + "# 伪造标题",
+			"正文" + sep + "5. 伪造条目",
+			"正文" + sep + "--- | ---",
+		} {
+			out := EscapeUntrusted(in)
+			if !strings.Contains(out, "&#8203;") {
+				t.Errorf("Unicode 行分隔符 %q 后的结构行应注入 ZWSP: %q -> %q", sep, in, out)
+			}
+		}
+	}
+	// 归一：U+2028 本体不再留场（与 \r 归一形态同款）。
+	out := EscapeUntrusted("好评\u2028# 系统结论")
+	if strings.Contains(out, "\u2028") {
+		t.Errorf("U+2028 应归一为 \\n: %q", out)
+	}
+}
+
 // TestEscapeUntrustedListVariants 回归（第九轮审计）：bullet+tab 与有序 1) 形态。
 func TestEscapeUntrustedListVariants(t *testing.T) {
 	for _, in := range []string{"-\t伪造条目", "1)\t伪造条目", "2) 伪造条目"} {

@@ -81,7 +81,14 @@ type Rule struct {
 // 打码」，键表覆盖面就是这个承诺的边界，缺一个常见缩写 = 该形态静默泄漏。
 // 已知代价：bypass/surpass 这类以 pass 结尾的普通词会被误伤（over-mask 是
 // 安全方向的错，漏 mask 才是事故）。
-const credentialSuffixGeneral = `(?:secrets?|pass(?:words?|wds?|es)?|pwds?|passphrases?|api_?keys?|access_?keys?|private[-_]?keys?|secret[-_]?keys?|client[-_]?keys?|auths?|kubeconfig)`
+//
+// keys?（oagentkit/guardx#178）：#45 点名的「key 的复数形态必须命中」此前
+// 只有带前缀的复合形态（api_keys/access_keys…）与字面 key 规则（只吃恰好
+// 等于 key 的键）——裸 keys=、foo_key=/mykey=（末词 key 被复合前缀结构
+// 吞掉后凭证词失配）整值原文返回。收编 keys? 后 foo_key/keys/keys 复数
+// 一并命中；已知代价与 pass 同款：monkeys/turkeys 这类以 keys 结尾的普通词
+// 误伤（over-mask 是安全方向）。JSON 面（jsonredact.go）词表同步收编。
+const credentialSuffixGeneral = `(?:secrets?|pass(?:words?|wds?|es)?|pwds?|passphrases?|keys?|api_?keys?|access_?keys?|private[-_]?keys?|secret[-_]?keys?|client[-_]?keys?|auths?|kubeconfig)`
 
 // credTokenPrefix 凭证语义的 token 复合前缀段（v0.18.1 收窄，oagentkit/guardx#52）：
 // 复数 tokens 只在「凭证前缀段 + tokens」时命中。
@@ -105,6 +112,19 @@ const credentialKeyPart = `((?:[A-Za-z0-9]*(?:[-_][A-Za-z0-9]*)*` + credentialSu
 // 方案词表与 auth-scheme-token 规则同源，两处一起改（guardx#81）。
 const bareValue = `((?:(?:Bearer|Basic|Negotiate|Digest)\s+)?[^\s&'"]+)`
 
+// bareValueLine 凭证词键的**未引号值行尾变体**（oagentkit/guardx#177）：凭证
+// 词键（password/passphrase/secret/token…）是高置信凭据键，其未引号值允许
+// 含空白（口令短语「correct horse battery staple」、YAML 未引号多词值
+// `password: horse battery`）——裸值窄形态在空白处收口只掩首词，其余原文
+// 落盘。本变体吃满行尾（[^\r\n]*），与引号/括号形态（各行其道，先应用）
+// 的分界靠首字符裁决：值以引号开头时不命中（引号形态已由专用规则整值掩，
+// 若在这里跨过引号继续吞行尾，会把 `{"password": "****", "user": "bob"}`
+// 这类 JSON 行的后续字段一起毁掉——#44 的「打码动作本身破坏行结构」重演）。
+// 方案词前缀与 bareValue 同源，两处一起改（guardx#81）。
+// 已知代价：凭证键行内其后内容一并被掩（`password=abc # note` 的注释段、
+// URL query 的 & 后段）——over-mask 是安全方向的错。
+const bareValueLine = `((?:(?:Bearer|Basic|Negotiate|Digest)\s+)?[^\s&'"][^\r\n]*)`
+
 // kvSeparator 键与值之间的分隔段（含键自身的闭引号）：捕获保留，替换时原样
 // 回填——「"key": "v"」打码后仍是「"key": "****"」，JSON 行的结构不再被
 // 打码动作本身破坏（oagentkit/guardx#44：此前 Repl 把分隔段吞成 `=`，冒号
@@ -123,8 +143,13 @@ var builtinRules = []Rule{
 		// 刻意**不**掩「纯用户名无密码」形态（ssh://git@github.com）：用户名
 		// 不是凭据，该形态是 git clone 日志最高频 URL，整体掩码会毁掉日志
 		// 定位；token-作-用户名（ghp_xxx@host）由 vendor-token-prefix 兜住。
+		// 密码段允许 `/`（guardx#179）：userinfo 的终止符是 `@` 不是 `/`——
+		// 此前 [^\s@/]+ 把密码含 `/` 的连接串（user:p/ass@host、路径式密钥）
+		// 整条打失配、凭据原文落日志（guardx#77 同族的文法缺陷）。用户名段
+		// 仍排除 `/`，`http://host/a:b@` 这类 path 内嵌 `:` 的形态因用户名段
+		// 跨不过 `/` 而整体不命中，不会被误吞。
 		Name: "url-embedded-credential",
-		Re:   regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9+.-]*)://([^\s:@/]*):([^\s@/]+)@`),
+		Re:   regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9+.-]*)://([^\s:@/]*):([^\s@]+)@`),
 		Repl: "$1://$2:****@",
 	},
 	{
@@ -251,8 +276,11 @@ var builtinRules = []Rule{
 		Repl: `$1$2****`,
 	},
 	{
+		// 未引号值走**行尾变体**（bareValueLine，guardx#177）：凭证词键是高
+		// 置信凭据键，口令短语/YAML 多词值在裸面只掩首词 = 其余原文泄漏；
+		// 通用 key-value 规则保持窄形态（散文里的 key= 不整行吞）。
 		Name: "credential-kv",
-		Re:   regexp.MustCompile(`(?i)` + credentialKeyPart + kvSeparator + bareValue),
+		Re:   regexp.MustCompile(`(?i)` + credentialKeyPart + kvSeparator + bareValueLine),
 		Repl: `$1$2****`,
 	},
 	{
@@ -285,9 +313,13 @@ var builtinRules = []Rule{
 		Repl: `$1$2'****'`,
 	},
 	{
+		// 裸值的分隔段捕获回填（guardx#180）：Repl 此前硬编码 `$1=****`，把
+		// 原文的 `:` 改写成 `=`——YAML/ini 形态的文本日志行打码后不再匹配按
+		// `:` 分隔的采集器，字段整条降级（#44 在裸面的同款失效形态）。
+		// 与 key-value 系列同款：捕获分隔段原样回填，只换凭据体。
 		Name: "authorization-header",
-		Re:   regexp.MustCompile(`(?i)(authorization|www-authenticate)\s*[:=]\s*[^\r\n]*`),
-		Repl: "$1=****",
+		Re:   regexp.MustCompile(`(?i)(authorization|www-authenticate)(\s*[:=]\s*)[^\r\n]*`),
+		Repl: "$1$2****",
 	},
 }
 

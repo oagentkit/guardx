@@ -31,8 +31,10 @@ func TestRedact(t *testing.T) {
 			mustNotContain: "eyJhbGciOiJIUzI1NiJ9",
 		},
 		{
+			// 未引号值吃满行尾（guardx#177）：口令短语/多词值此前只掩首词。
+			// 已知代价：同行其后内容一并被掩（over-mask 是安全方向）。
 			in:             "password=hunter2 user=bob",
-			want:           "password=**** user=bob",
+			want:           "password=****",
 			mustNotContain: "hunter2",
 		},
 		{
@@ -43,8 +45,9 @@ func TestRedact(t *testing.T) {
 			mustNotContain: "MIIEvQ",
 		},
 		{
+			// kubeconfig 在词表内：行尾变体把同行尾段一并掩掉（guardx#177）
 			in:             "kubeconfig = /home/u/.kube/config with secret-key: abc123",
-			want:           "secret-key: ****",
+			want:           "kubeconfig = ****",
 			mustNotContain: "abc123",
 		},
 		{
@@ -139,10 +142,18 @@ func TestRedactValueKeyedMasking(t *testing.T) {
 	if list[1] != "safe" {
 		t.Errorf("安全文本应原样: %v", list[1])
 	}
-	// 中性键不误伤
-	out2, _ := RedactValue(map[string]any{"sort_key": "name", "authorized_keys": "/home"}).(map[string]any)
-	if out2["sort_key"] != "name" || out2["authorized_keys"] != "/home" {
+	// 中性键不误伤：keynote/vault_items 不含凭证词的 [-_] 分隔段形态
+	// （monkey_business 含 key 子串被误伤——与 bypass/surpass 同款既定代价）
+	out2, _ := RedactValue(map[string]any{"keynote": "spring", "vault_items": 2}).(map[string]any)
+	if out2["keynote"] != "spring" || out2["vault_items"] != 2 {
 		t.Errorf("中性键误伤: %v", out2)
+	}
+	// keys? 收编（guardx#178）：sort_key/authorized_keys 此前按「中性键不误伤」
+	// 裁决放行——#178 推翻：键表覆盖面即承诺边界，裸 keys/foo_key/sort_key
+	// 整值原文返回是静默泄漏；误伤（over-mask）是安全方向的既定代价。
+	out3, _ := RedactValue(map[string]any{"sort_key": "name", "authorized_keys": "/home", "keys": "a b"}).(map[string]any)
+	if out3["sort_key"] != "****" || out3["authorized_keys"] != "****" || out3["keys"] != "****" {
+		t.Errorf("keys 形态应整值打码（guardx#178）: %v", out3)
 	}
 }
 
