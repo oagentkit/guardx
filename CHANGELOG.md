@@ -4,7 +4,73 @@
 
 ## [v0.26.0] — 2026-11-14
 
-- 与 v0.25.2 相比无代码差异（版本号/打包变更）
+### 新增(rbac)：下沉角色能力矩阵机制
+
+新 rbac 子包：只收机制，词表（角色名、能力词）全部由宿主注入，不留
+宿主专用形参——否则落成 bianque 专用。
+API 面：
+- Matrix：角色→能力集矩阵（宿主声明面数据，原样比对不归一）
+- Can：查表，矩阵外没有能力（fail-closed）
+- ReadOnly：只读档由矩阵推导（判据恒为「能力集不含写面能力」，不硬编码
+  role==viewer）；写面词表 nil/空 = 无法证明任何能力是读面 = 全禁
+  （漏声明得到的是「全禁」，不是「全放」）
+- Snapshot：授权面指纹（角色/能力字典序去重，同矩阵恒同串，policyver 类
+  指纹消费）
+- Lint：「矩阵不得装饰化」骨架三条判据——每条能力词有执行面消费点
+  （回调宿主注入，未注入 = 逐词报疑点 fail-loud）、角色词表闭合、
+  矩阵单调（相邻两层高层 ⊇ 低层，传递性覆盖全链）
+与 permgate 的分工边界（角色面 vs 调用面）写进包文档：permgate 裁「这次
+调用要不要人确认」，rbac 裁「这个角色有没有这个能力」，不可互相替代。
+零第三方依赖（纯 stdlib + slices）。AGENTS/README 包清单同步。
+
+### 新增(logredact)：双模式与可配掩码
+
+ValueOptions 增三个面（收编 bianque internal/redact 的键名谓词与打码体）：
+- KeyMode/KeyTokens：宿主词元表三档匹配口径——KeyMatchSegment 分段
+  （零值默认，与内置表并集，默认行为不变）、KeyMatchExact 精确收窄
+  （显式 opt-in：内置词表整体退出，只打恰等于词元的键，保事件面计量
+  字段；(e) 的安全张力按显式 opt-in + 零值不变处理）、KeyMatchSubstring
+  子串（审计面 LooseKey 迁移口径，并集不松动内置保护）。
+- Mask：凭证词键整值打码体可配（审计面 "***"），空串回落内置 "****"
+  杜绝忘填 = 空掩码的静默失效；只作用键名面，文本面仍由规则 Repl 决定。
+- 实证差异对比（(e) 证据义务）：issue176_dualmode_test.go 逐键对照
+  迁移前纯子串命中面 vs 纯宿主分段命中面——主差集为词元后直连字母/数字
+  的复合形态（mypassword1/passwordx/secret1/tokens），并集迁移后命中面
+  两侧只宽不窄，内置保护不松动。
+分段口径词元编译缓存单飞（sync.Map），词表构造一次复用零重复编译。
+
+### 修复(wire)：超时回帧入账
+
+execute() 的期限/取消路径此前 writeFrame 直写、未经 charge——「所有出站
+字节必记账」（不变量 3）多了一个未登记例外：#185 已把 handler 失败帧的
+Error 面入账，但父侧自生成的超时 Error 仍绕账。文案今天由父侧固定生成
+（不含对端可控内容），不构成实际攻击面，但不变量不该靠文案善良好使——
+后续谁往超时文案里拼对端可控内容（截断回显），账必须在。
+修后与 serveOne 同一 charge 口径（Value/Error 两段之和）：预算内正常回帧、
+超限拒付整帧回「输出字节配额已用尽」（拒付帧本身不入账——charge 已拒绝，
+无账可记，父侧固定文案，与 serveOne 同款）。期限与父侧取消两条路径同一
+处理，不变量无例外。
+
+### 修复(logredact)：裸 userinfo 形态
+
+url-embedded-credential 按 userinfo 文法锚定在 :scheme// 之后，无 scheme 的
+DSN/连接串形态（connection=user:secretpw@10.0.0.9:5432/app）全链路不命中、
+凭据整串落盘。新增 bare-userinfo-credential 规则（紧随文法规则）：
+- 形态 (^|[^/])([A-Za-z][\w.+-]*):([^\s@]+)@ + Repl 原样回填左边界；
+- 误伤三道裁决（issue 误伤面验收的对照表钉在 issue187_bare_userinfo_test.go）：
+  1. 用户段首字符 [A-Za-z]——时间戳 12:34@ 数字开头整体失配；
+  2. 左边界排除 /——a/b:c@ 类路径内冒号（冒号后无凭据体）失配；RE2 非锚定
+     起配下用户段可词中段起配 + 边界字符回填重构原文，路径中段嵌入完整
+     凭据样式（段:段@）照样掩（over-mask 方向）；
+  3. Rule 新增 Guard 命中守卫（RE2 无环视，「命中了但按上下文豁免」的公开
+     出口，两种 Style 生效，扩展规则同样可用）：mailto: 冒号后是邮箱本地部、
+     pass 段 // 起头是 scheme:// 分隔符（已掩 scheme URL 结构不咬）、
+     尖括号地址形态（Message-ID 家族）三类豁免；纯用户名无密码形态
+     （ssh://git@host）照旧不掩。
+- 密码段 [^\s@]+ 与 url-embedded 同口径（#179：允许 / 与多段 :）。
+- kv 词表裁决：connection 刻意不收凭证词表——中性遥测词
+  （connection=5/connection_timeout/connections），收词表 = 计量面数据
+  损坏（#52 同款）；凭据面按值形态兜住，与键名无关。
 
 ## [v0.25.2] — 2026-11-14
 
