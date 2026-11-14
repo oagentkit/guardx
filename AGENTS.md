@@ -1,13 +1,13 @@
 # AGENTS.md — oagentkit/guardx
 
-> 安全围栏，10 个包：`fence` `injectband` `logredact` `egress` `egressproxy` `permgate` `invoke` `toolfail` `sandbox` `wire`
+> 安全围栏，11 个包：`fence` `injectband` `logredact` `egress` `egressproxy` `permgate` `rbac` `invoke` `toolfail` `sandbox` `wire`
 > module：`github.com/oagentkit/guardx` · org：[oagentkit = Open Agent Kit](https://github.com/oagentkit)
 > 矩阵分层：**tier 0（基础层）**
 
 ## 本仓包含
 
 ```
-fence/  injectband/  logredact/  egress/  egressproxy/  permgate/  invoke/  toolfail/  sandbox/  wire/
+fence/  injectband/  logredact/  egress/  egressproxy/  permgate/  rbac/  invoke/  toolfail/  sandbox/  wire/
 ```
 
 **本仓是 1 个 Go module、1 条版本线、零第三方依赖。**
@@ -70,6 +70,16 @@ github.com/oekit/pkg v0.22.1
   不执行命令。**不得改成 exec 执行后再判断**。
 - **`permgate`** —— 许可判定的默认值必须是**拒绝**，白名单显式开。
   新增能力时默认拒绝，不要用「未配置即放行」。
+- **`rbac`** —— 角色能力矩阵机制（#175：只收机制，词表是宿主数据）。硬规则：
+  - **fail-closed**：未声明的角色/能力词即无能力（`Can` 恒 false）；写面词表
+    未声明 ⇒ 无法证明任何能力是读面 ⇒ 全角色推导为只读（写面全禁）——漏声明
+    得到的是「全禁」，不是「全放」。
+  - **只读档由矩阵推导，不硬编码角色名**：`role == "viewer"` 式硬编码在矩阵
+    演进时静默失真（声明面改了、执行面没跟上）。
+  - **矩阵不得装饰化**：每条能力词必须有执行面消费点；lint 的消费点回调由
+    宿主注入，未注入 = 无法核实 = 逐词报疑点（判据的死法是沉默）。
+  - **与 permgate 的分工边界**：permgate 裁「这次调用要不要人确认」（调用面），
+    rbac 裁「这个角色有没有这个能力」（角色面）——两套判定不可互相替代。
 - **`invoke`** —— 工具调用的**统一契约与不可绕过的调用链**：链的构造即保证
   （构造器不给出绕过路径）。它刻意**不携带任何框架类型**（不绑 eino / policy 的
   类型），审计语义由各 Stage 自己从 Name/Server/Args 读——所以它是**框架无关的原语**，
