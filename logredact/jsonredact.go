@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -63,17 +64,75 @@ func IsCredentialKey(key string) bool {
 	return jsonCredentialKeyRe.MatchString(key)
 }
 
+// KeyMatchMode ValueOptions.KeyTokens 的匹配口径（oagentkit/guardx#176）：
+// 宿主词元表以哪种粒度参与键名判定。零值 = KeyMatchSegment（与内置词表同一
+// 分段口径，默认行为不变）。
+//
+// 三档来源（#176 (b)：bianque internal/redact 的两套键名谓词 + 内置表的既有
+// 口径）：ExactKey（只打恰等于敏感词的键，保计量字段）、LooseKey（子串命中，
+// 审计面迁移前正则逐字对齐）、内置分段（凭证词作为 [-_] 分隔的段，#132 后
+// 可在键的任意段）。三者互不替代，按 ValueOptions.KeyMode 单选。
+type KeyMatchMode int
+
+const (
+	// KeyMatchSegment 分段口径（零值默认）：词元按内置凭证词的同款段语义
+	// 命中——词元可出现在键的任意位置（前缀直连或 [-_] 分隔皆可，guardx#132
+	// 口径），其后只允许 [-_] 分隔的后续段到键尾。词元按字面匹配，不带内置
+	// 表的复数/缩写展开（"token" 不自动吃 "tokens"，复数形态请自行列入词元
+	// 表）；也不内置 #52 的 token 计量收窄——#52 是内置词表的计量面契约，
+	// 宿主词元表是显式声明，要保计量字段请走 KeyMatchExact。
+	KeyMatchSegment KeyMatchMode = iota
+	// KeyMatchExact 精确口径：键名归一（小写 + 去首尾空白）后**恰等于**词元
+	// 才命中——bianque 事件面的 ExactKey 形态（保计量字段：内置分段表会
+	// over-mask 的 sort_key/cache_key 等中性键在此口径下不打码）。
+	//
+	// ⚠️ 这是**收窄模式**（guardx#176 (e) 的安全张力）：本口径下内置词表
+	// **整体退出**，生效的凭证键集合 = 恰等于 KeyTokens 词元的键（∪
+	// IsCredentialKey 回调）。「键表内的键，值必被打码」的承诺边界由内置表
+	// 守着——收窄即显式放弃这层兜底：词元表漏了 password/token 这类通用
+	// 凭证词，它们将**原文落盘**。故本口径只应用于载荷键名完全受宿主控制的
+	// 场景（事件面的自持计量清单），且**必须显式 opt-in**（零值恒为
+	// KeyMatchSegment，默认行为不变）。KeyTokens 为空且未配 IsCredentialKey
+	// 时收窄到空集 = 什么都不打码——本包不拦截这个配置（显式即责任），
+	// 调用方要清楚这是字面语义。
+	KeyMatchExact
+	// KeyMatchSubstring 子串口径：键名归一（小写）后**包含**词元即命中——
+	// bianque 审计面 LooseKey 的迁移口径（迁移前正则逐字对齐）。比分段宽：
+	// "mypassword1"、"passwordx" 这类分段失配的键同样命中（over-mask 方向，
+	// 与凭证词表吞 bypass 的取舍同款）。并集模式下内置保护不松动。
+	// 迁移前正则命中面 vs 内置分段命中面的逐键实证差异对比见
+	// issue176_dualmode_test.go（guardx#176 (e) 的证据义务）。
+	KeyMatchSubstring
+)
+
 // ValueOptions RedactValue / RedactJSON 结构化路径的行为选项（零值 = 内置
 // 词表语义）。
 type ValueOptions struct {
-	// IsCredentialKey 追加的键名判定：返回 true 的键整值打码（**叠加**于
-	// 内置词表之上；返回 false 不豁免内置命中——要豁免请走自持 Redactor，
-	// 内置词表的「值必被打码」承诺不因回调而松动）。nil = 仅内置词表。
+	// IsCredentialKey 追加的键名判定：返回 true 的键整值打码。并集模式
+	// （KeyMatchSegment/KeyMatchSubstring）下**叠加**于「内置词表 ∪
+	// KeyTokens」之上；KeyMatchExact（收窄模式）下叠加于宿主词元集之上。
+	// 返回 false 不豁免内置命中——要豁免请走 KeyMatchExact（显式收窄），
+	// 内置词表的「值必被打码」承诺不因回调而静默松动。nil = 不追加。
 	// （oagentkit/guardx#51：集成方喂自己的 isCredentialKey，替掉为兜自家
 	// 键形态而维护的整套绕行脱敏器。）struct 路径传的是 jsonFieldName 取的
 	// 键名——json tag 首段优先、无 tag/`-` 回落字段名（guardx#130），与
 	// map 形态见到的键同一口径。
 	IsCredentialKey func(key string) bool
+	// Mask 凭证词键整值打码体（oagentkit/guardx#176）：键名判定命中后整值
+	// 替换为该字面。空串回落内置 "****"（maskLiteral）——空回落杜绝
+	// 「忘填 = 空掩码」的静默失效。迁移动机：审计面打码体约定为 "***"，
+	// 此前 maskLiteral 硬编码 const 无法表达。⚠️ 只作用于**键名面**的整值
+	// 打码；字符串叶子内的内嵌凭据仍由文本规则打码（掩码字面由各规则 Repl
+	// 决定，需要同风格时用 ExtraRules 覆写）。
+	Mask string
+	// KeyTokens 宿主词元表（oagentkit/guardx#176）：与内置凭证词表参与同一
+	// 键名判定，匹配口径按 KeyMode。词元是宿主领域数据（本包不预设、不
+	// 展开），双侧归一（小写、去首尾空白）后比对。词表建议构造一次复用：
+	// 分段口径的编译缓存以归一词元为键，逐调用重建词表会绕过缓存收益。
+	KeyTokens []string
+	// KeyMode KeyTokens 的匹配口径。零值 KeyMatchSegment（默认行为不变）；
+	// KeyMatchExact 为收窄模式（内置表退出），语义与风险见其注释。
+	KeyMode KeyMatchMode
 	// ExtraRules 追加到字符串叶子文本规则的扩展表（guardx#76 的**值模式**
 	// 检测缝）：结构化路径的每个字符串叶子按「先内置、后扩展」过
 	// RedactWith——手机号/身份证这类**值本身即敏感、无键名可依**的形态由
@@ -103,8 +162,9 @@ func RedactJSON(data []byte) []byte {
 	return RedactJSONOpts(data, ValueOptions{})
 }
 
-// RedactJSONOpts 同 RedactJSON，接受 ValueOptions（自定义键名判定、值模式
-// 扩展规则等；非法 JSON 回落文本规则时 ExtraRules 同样生效）。
+// RedactJSONOpts 同 RedactJSON，接受 ValueOptions（自定义键名判定、宿主
+// 词元表与匹配口径、可配打码体、值模式扩展规则等，guardx#176；非法 JSON
+// 回落文本规则时 ExtraRules 同样生效）。
 func RedactJSONOpts(data []byte, opts ValueOptions) []byte {
 	if json.Valid(data) {
 		dec := json.NewDecoder(bytes.NewReader(data))
@@ -141,11 +201,89 @@ var (
 	sliceAnyType     = reflect.TypeFor[[]any]()
 )
 
-// isCredentialKeyName 键名判定：内置词表 + 调用方回调叠加（回调只加不减，
-// guardx#51 契约：返回 false 不豁免内置命中）。
+// isCredentialKeyName 键名判定（guardx#176 双模式）：宿主词元表按 KeyMode
+// 口径判定，IsCredentialKey 回调叠加（回调只加不减，guardx#51 契约），内置
+// 词表按模式参与——
+//
+//   - KeyMatchSegment / KeyMatchSubstring（并集模式）：内置 ∪ 宿主 ∪ 回调；
+//   - KeyMatchExact（收窄模式，显式 opt-in）：内置**退出**，生效集 =
+//     恰等于 KeyTokens 词元的键 ∪ 回调（安全张力见 KeyMatchExact 注释）。
 func isCredentialKeyName(key string, opts ValueOptions) bool {
+	if hostKeyMatch(key, opts) {
+		return true
+	}
+	if opts.KeyMode == KeyMatchExact {
+		return opts.IsCredentialKey != nil && opts.IsCredentialKey(key)
+	}
 	return jsonCredentialKeyRe.MatchString(key) ||
 		(opts.IsCredentialKey != nil && opts.IsCredentialKey(key))
+}
+
+// hostKeyMatch 宿主词元表（opts.KeyTokens）按 opts.KeyMode 口径的键名判定。
+// 双侧归一（小写；键另去首尾空白）后比对；空词元跳过。词表为空恒 false
+// （零值行为与 #176 之前逐字节一致）。
+func hostKeyMatch(key string, opts ValueOptions) bool {
+	if len(opts.KeyTokens) == 0 {
+		return false
+	}
+	norm := strings.ToLower(strings.TrimSpace(key))
+	switch opts.KeyMode {
+	case KeyMatchExact:
+		for _, tok := range opts.KeyTokens {
+			if strings.ToLower(strings.TrimSpace(tok)) == norm {
+				return true
+			}
+		}
+		return false
+	case KeyMatchSubstring:
+		for _, tok := range opts.KeyTokens {
+			if t := strings.ToLower(strings.TrimSpace(tok)); t != "" && strings.Contains(norm, t) {
+				return true
+			}
+		}
+		return false
+	default:
+		return hostSegmentMatch(norm, opts.KeyTokens)
+	}
+}
+
+// hostSegmentCache 分段口径词元的编译缓存（键 = 归一词元）：形态与内置
+// jsonCredentialKeyRe 同款——词元任意位起 + [_-] 分隔后续段到键尾
+// （guardx#132 口径）。并发单飞编译（sync.Map LoadOrStore）；词元表构造
+// 一次复用的宿主零重复编译成本，逐调用重建词表只是退化为慢路径，语义不变。
+var hostSegmentCache sync.Map // 归一词元 string → *regexp.Regexp
+
+// hostSegmentRe 单词元的分段匹配正则（缓存单源）。多段词元（如 "api_key"）
+// 的分隔符放开为 [_-]——与内置表的 api[_-]?keys? 家族同款弹性；下划线不被
+// QuoteMeta 转义（字面保留），横线转义为 `\-`，两个形态一并放开。
+func hostSegmentRe(token string) *regexp.Regexp {
+	if re, ok := hostSegmentCache.Load(token); ok {
+		return re.(*regexp.Regexp)
+	}
+	quoted := regexp.QuoteMeta(token)
+	flexible := strings.NewReplacer("_", "[_-]", `\-`, "[_-]").Replace(quoted)
+	re := regexp.MustCompile(`(?:` + flexible + `)(?:[_-][a-z0-9_-]*)*$`)
+	stored, _ := hostSegmentCache.LoadOrStore(token, re)
+	return stored.(*regexp.Regexp)
+}
+
+// hostSegmentMatch 分段口径：任一词元的段语义命中即 true。
+func hostSegmentMatch(normKey string, tokens []string) bool {
+	for _, tok := range tokens {
+		if t := strings.ToLower(strings.TrimSpace(tok)); t != "" && hostSegmentRe(t).MatchString(normKey) {
+			return true
+		}
+	}
+	return false
+}
+
+// maskOr 凭证词键的整值打码体：opts.Mask 空 = 内置 "****"（guardx#176；
+// 空回落杜绝「忘填 = 空掩码」的静默失效）。
+func (o ValueOptions) maskOr() string {
+	if o.Mask == "" {
+		return maskLiteral
+	}
+	return o.Mask
 }
 
 func redactWalkDepth(v any, payload map[string]struct{}, opts ValueOptions, depth int) any {
@@ -169,7 +307,7 @@ func redactWalkDepth(v any, payload map[string]struct{}, opts ValueOptions, dept
 				}
 			}
 			if isCredentialKeyName(k, opts) {
-				out[k] = maskLiteral
+				out[k] = opts.maskOr() // guardx#176：打码体可配（空回落 "****"）
 				continue
 			}
 			out[k] = redactWalkDepth(vv, payload, opts, depth+1)
@@ -291,22 +429,23 @@ func stringValueOf(val reflect.Value) (string, bool) {
 }
 
 // maskValueFor 目标元素/字段类型的整值打码值：string（含命名 string，经
-// Convert 还型）与接口类型承载 "****"；复合类型（slice/array/map/pointer/
+// Convert 还型）与接口类型承载打码体（mask，guardx#176 可配；调用方传
+// opts.maskOr() 保证非空）；复合类型（slice/array/map/pointer/
 // struct）承载不了字符串字面量，但**凭证键命中后不放弃处理**（guardx#162）
 // ——返回同类型空值清掉原文（slice 空切片、map 空 map、pointer nil、
 // array/struct 零值），兑现「键表内的键，值必被打码」而不是转下探把形状
 // 规则认不出的随机口令原样放行。数字/布尔返回 false 由调用方转下探：本体
 // 不是凭据文本，any 形态里它们被掩是「能掩就掩」，类型化形态里掩不了是
 // 类型系统的硬边界，不是承诺松动（#162 沿用本免责，不扩大改动面）。
-func maskValueFor(t reflect.Type) (reflect.Value, bool) {
+func maskValueFor(t reflect.Type, mask string) (reflect.Value, bool) {
 	switch t.Kind() {
 	case reflect.String:
 		if t == stringType {
-			return reflect.ValueOf(maskLiteral), true
+			return reflect.ValueOf(mask), true
 		}
-		return reflect.ValueOf(maskLiteral).Convert(t), true
+		return reflect.ValueOf(mask).Convert(t), true
 	case reflect.Interface:
-		return reflect.ValueOf(maskLiteral), true
+		return reflect.ValueOf(mask), true
 	case reflect.Slice:
 		return reflect.MakeSlice(t, 0, 0), true
 	case reflect.Map:
@@ -342,7 +481,7 @@ func walkReflectMap(rv reflect.Value, payload map[string]struct{}, opts ValueOpt
 				// 非字符串形态的载荷值：下探（与 any 形态同语义）
 			}
 			if isCredentialKeyName(ks, opts) {
-				if mv, ok := maskValueFor(et); ok {
+				if mv, ok := maskValueFor(et, opts.maskOr()); ok {
 					out.SetMapIndex(k, mv)
 					continue
 				}
@@ -407,7 +546,7 @@ func walkReflectStruct(rv reflect.Value, payload map[string]struct{}, opts Value
 			// 非字符串形态的载荷值：下探（与 any 形态同语义）
 		}
 		if isCredentialKeyName(name, opts) {
-			if mv, ok := maskValueFor(f.Type); ok {
+			if mv, ok := maskValueFor(f.Type, opts.maskOr()); ok {
 				out.Field(i).Set(mv)
 				continue
 			}
