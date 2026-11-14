@@ -213,10 +213,16 @@ func TestReadOnlyModeDeniesInsteadOfAsk(t *testing.T) {
 	if d := s.Check(ctx, "read", nil, ModeReadOnly, Capability{ReadOnly: true}); d.Behavior != Allow || d.RuleID != "mode.read_only" {
 		t.Fatalf("只读+只读工具应放行: %+v", d)
 	}
-	// 会话授权是用户已经给出的决定（放行），不是一次「问」——保持不看模式
+	// 会话授权压不过只读拦截（guardx#182）：修前 checkAlwaysAsk 把会话授权
+	// 放在只读拦截之前——AlwaysAsk 写工具凭会话钥匙在只读档直接放行，普通
+	// 写工具却被拦（敏感度倒挂）。统一为「禁」压过钥匙，与普通写工具同参。
 	s.AllowForSession("deploy", "")
-	if d := s.Check(ctx, "deploy", nil, ModeReadOnly, Capability{AlwaysAsk: true}); d.Behavior != Allow || d.RuleID != "rule.session.allow" {
-		t.Fatalf("只读+会话授权应放行: %+v", d)
+	if d := s.Check(ctx, "deploy", nil, ModeReadOnly, Capability{AlwaysAsk: true}); d.Behavior != Deny || d.RuleID != "mode.read_only" {
+		t.Fatalf("只读+会话授权的写工具应拒（guardx#182 两路径同参）: %+v", d)
+	}
+	// 只读档之外钥匙照常放行（既有语义不弱化）
+	if d := s.Check(ctx, "deploy", nil, ModeDefault, Capability{AlwaysAsk: true}); d.Behavior != Allow || d.RuleID != "rule.session.allow" {
+		t.Fatalf("默认档+会话授权应放行: %+v", d)
 	}
 	// 交互型工具不在拦截范围内：它不产生副作用（plan 档要靠它提问）
 	if d := s.Check(ctx, "ask_user", nil, ModeReadOnly, Capability{RequiresUserInteraction: true}); d.Behavior != Ask {
