@@ -325,9 +325,18 @@ var builtinRules = []Rule{
 		// 未引号值走**行尾变体**（bareValueLine，guardx#177）：凭证词键是高
 		// 置信凭据键，口令短语/YAML 多词值在裸面只掩首词 = 其余原文泄漏；
 		// 通用 key-value 规则保持窄形态（散文里的 key= 不整行吞）。
-		Name: "credential-kv",
-		Re:   regexp.MustCompile(`(?i)` + credentialKeyPart + kvSeparator + bareValueLine),
-		Repl: `$1$2****`,
+		//
+		// guardx#190：左边界组消费键前一字符——命中段落在 «…» 掩码区内
+		// （外来掩码，如 stringx.Masker 的 `«secret-assignment:****»`；掩码
+		// 自身的 `kind:****` 恰构成 kv 形态）时由 credentialKvGuard 豁免：
+		// 行尾变体会把收尾 » 一并吞掉，掩码括号不配对 ⇒ 下游按掩码形态做
+		// 的配对统计/还原/审计全失真。边界**紧贴**键才豁免——法式引号
+		// `« password: hunter2 »`（« 后有空格，边界是空格）照常掩，不为
+		// 保括号开泄漏口。Repl 回填边界组（$1），命中输出与加组前逐字节一致。
+		Name:  "credential-kv",
+		Re:    regexp.MustCompile(`(?i)(^|[^A-Za-z0-9])` + credentialKeyPart + kvSeparator + bareValueLine),
+		Repl:  `$1$2$3****`,
+		Guard: credentialKvGuard,
 	},
 	{
 		// PEM 私钥整段打码（载荷/日志防泄漏的最后兜底）
@@ -391,6 +400,24 @@ func bareUserinfoGuard(match string) bool {
 
 // bareUserinfoRe 裸 userinfo 规则的编译源（Guard 重解析共用同一份）。
 var bareUserinfoRe = regexp.MustCompile(`(^|[^/])([A-Za-z][\w.+-]*):([^\s@]+)@`)
+
+// credentialKvRe 是 credential-kv 规则的编译源（Guard 重解析共用同一份，
+// 与 bareUserinfoRe 同款纪律——两处各写一份字面量必然漂移）。
+var credentialKvRe = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9])` + credentialKeyPart + kvSeparator + bareValueLine)
+
+// credentialKvGuard 掩码区豁免（guardx#190）：命中段左边界是 « ⇒ 键落在
+// «…» 掩码区内（外来掩码 / 自身令牌区），掩码自身的 `kind:****` 恰是 kv
+// 形态——行尾变体再掩一次会把收尾 » 吞掉（括号不配对，下游配对统计/还原/
+// 审计全失真）。只认紧贴键的 «：`« password:`（« 后带空格的法式引号）
+// 边界是空格，照常掩——不为保括号开泄漏口。重解析失败按「不是掩码区」
+// 处理（照常掩：安全方向）。
+func credentialKvGuard(match string) bool {
+	sub := credentialKvRe.FindStringSubmatch(match)
+	if sub == nil {
+		return true
+	}
+	return sub[1] != "«"
+}
 
 // Rules 返回内置规则表的**副本**。
 //
