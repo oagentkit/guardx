@@ -92,8 +92,8 @@ func TestIssue181SplitCommandDispatchers(t *testing.T) {
 // 被拦。修复后统一为「禁」压过钥匙：两条路径对同参数同参。
 func TestIssue182ReadOnlySessionKeyParity(t *testing.T) {
 	s := &Service{}
-	s.AllowForSession("deploy", "")      // AlwaysAsk 写工具
-	s.AllowForSession("file_write", "")  // 普通写工具
+	s.AllowForSession("deploy", "")     // AlwaysAsk 写工具
+	s.AllowForSession("file_write", "") // 普通写工具
 	capAlwaysAsk := Capability{AlwaysAsk: true}
 	// AlwaysAsk 写工具：只读拦截先于会话授权（修前 rule.session.allow）
 	if d := s.Check(ctx, "deploy", nil, ModeReadOnly, capAlwaysAsk); d.Behavior != Deny || d.RuleID != "mode.read_only" {
