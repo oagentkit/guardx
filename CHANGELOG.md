@@ -2,6 +2,10 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.26.0] — 2026-11-14
+
+- 与 v0.25.2 相比无代码差异（版本号/打包变更）
+
 ## [v0.25.2] — 2026-11-14
 
 ### 修复(wire)：输出字节预算计入 Error 面——失败帧字节不再绕过 MaxBytes
