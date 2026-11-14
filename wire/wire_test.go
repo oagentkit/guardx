@@ -886,3 +886,86 @@ func TestServerMaxBytesChargesSmallError(t *testing.T) {
 		t.Errorf("已用字节=%d，应为 10（Error 面入账）", used)
 	}
 }
+
+// ---- #188：超时/取消回帧的字节同入预算账（不变量无例外）----
+
+// TestServerTimeoutFrameRejectedOverBudget 期限回帧的 Error 面超字节预算时
+// 必须被拒付整帧（guardx#188）：execute 的期限路径此前 writeFrame 直写、
+// 未经 charge——「所有出站字节必记账」的不变量多了一个未登记例外。
+// 文案今天由父侧固定生成，但不变量不该靠文案善良好使。
+func TestServerTimeoutFrameRejectedOverBudget(t *testing.T) {
+	child, parent, cleanup := channelPair()
+	defer cleanup()
+
+	server := NewServer(parent, func(ctx context.Context, req Request) (Response, error) {
+		<-ctx.Done()
+		return Response{OK: true}, nil
+	}, WithBudget(Budget{MaxBytes: 10}), WithMaxCallDeadline(80*time.Millisecond))
+	go func() { _ = server.Serve(context.Background()) }()
+
+	resp, _ := rawCall(t, child, 0)
+	if resp.OK || resp.Kind != string(toolfail.ClassRateLimited) || !strings.Contains(resp.Error, "输出字节") {
+		t.Fatalf("期限文案远超 10 字节，超时帧必须被拒付整帧，实得 %+v", resp)
+	}
+	// 拒付的那次不落账：字节账应停在 0（charge 拒绝即不扣，与 serveOne 同款）。
+	if _, used := server.budget.Used(); used != 0 {
+		t.Errorf("已用字节=%d，应为 0（超限那次不记账）", used)
+	}
+}
+
+// TestServerTimeoutFrameChargedBytes 期限回帧在预算内时字节正常入账（guardx#188）
+// ——入账面恰为回帧的 Error 文本长度（Value 段为空）。
+func TestServerTimeoutFrameChargedBytes(t *testing.T) {
+	child, parent, cleanup := channelPair()
+	defer cleanup()
+
+	server := NewServer(parent, func(ctx context.Context, req Request) (Response, error) {
+		<-ctx.Done()
+		return Response{OK: true}, nil
+	}, WithMaxCallDeadline(80*time.Millisecond))
+	go func() { _ = server.Serve(context.Background()) }()
+
+	resp, _ := rawCall(t, child, 0)
+	if resp.OK || resp.Kind != string(toolfail.ClassTransient) {
+		t.Fatalf("期限必须回类型化失败帧，实得 %+v", resp)
+	}
+	// writeFrame 前已 charge（子侧读到帧即账已落），Error 文本长度即入账字节。
+	if _, used := server.budget.Used(); used != len(resp.Error) {
+		t.Errorf("已用字节=%d，应为 %d（期限回帧 Error 面入账）", used, len(resp.Error))
+	}
+}
+
+// TestServerCancelFrameChargedBytes 父侧取消路径的回帧同样入账（guardx#188，
+// 与期限路径同一 charge 口径——不变量无例外）。
+func TestServerCancelFrameChargedBytes(t *testing.T) {
+	child, parent, cleanup := channelPair()
+	defer cleanup()
+
+	serveCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// 取消回帧分支只在期限包装激活时存在（无期限时取消直接传导给 handler，
+	// 不经 execute 的 select）——宿主上限让期限包装生效，再取消 Serve ctx。
+	server := NewServer(parent, func(ctx context.Context, req Request) (Response, error) {
+		<-ctx.Done()
+		return Response{OK: true}, nil
+	}, WithMaxCallDeadline(5*time.Second))
+	go func() { _ = server.Serve(serveCtx) }()
+
+	if err := WriteFrame(child.w, Request{V: Version, ID: "c-1", Tool: "t"}); err != nil {
+		t.Fatalf("写帧失败: %v", err)
+	}
+	// 等调用进入 execute（请求被受理）再取消。
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	var resp Response
+	if err := ReadFrame(child.r, &resp); err != nil {
+		t.Fatalf("读帧失败: %v", err)
+	}
+	if resp.OK || !strings.Contains(resp.Error, "父侧取消") {
+		t.Fatalf("取消必须回父侧取消失败帧，实得 %+v", resp)
+	}
+	if _, used := server.budget.Used(); used != len(resp.Error) {
+		t.Errorf("已用字节=%d，应为 %d（取消回帧 Error 面入账）", used, len(resp.Error))
+	}
+}
