@@ -2,6 +2,26 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.25.2] — 2026-11-14
+
+### 修复(wire)：输出字节预算计入 Error 面——失败帧字节不再绕过 MaxBytes
+
+- f2ef8b5
+
+### 修复(fence)：行终止符归一收编 U+2028/U+2029——与 websearch 控制字符口径对齐
+
+- 71d1f9e
+
+### 修复(permgate)：deny 侧命令替换视为命中+派发器解包、只读档会话钥匙位次统一、混用通配形态退化+告警(#181 #182 #183)
+
+- 49be3d5
+
+### 修复(logredact)：脱敏四单——凭证键多词裸值整掩、keys? 两面词表合流、URL 密码段允许 /、authorization 分隔符保形(#177 #178 #179 #180)
+
+- dde4e2f
+
+- 格式(permgate)：gofmt issue_sweep_1114_test.go（CI Lint 门禁）
+
 ## [v0.25.1] — 2026-11-14
 
 ### 重构(logredact,permgate)：for 计数循环 → range over int（1.22）
