@@ -119,7 +119,9 @@ func TestNewRedactorConcurrent(t *testing.T) {
 	for range 16 {
 		wg.Go(func() {
 			for range 50 {
-				if got := red("password=secret foo"); !strings.Contains(got, "BAR") {
+				// 探针的 foo 放在凭据 kv 之前（guardx#177 起凭证键的未引号值
+				// 吃满行尾，其后同行文本会被一并掩掉——over-mask 是既定代价）。
+				if got := red("foo password=secret"); !strings.Contains(got, "BAR") {
 					t.Errorf("并发下结果不对：%q", got)
 					return
 				}

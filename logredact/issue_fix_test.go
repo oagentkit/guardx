@@ -145,7 +145,9 @@ func TestRedactBracketValueWholeMasked(t *testing.T) {
 	for _, c := range []struct{ in, want string }{
 		{`password=["a","b"]`, `password=****`},
 		{`token={"k":"v"}`, `token=****`},
-		{`password=["a","b"] tail`, `password=**** tail`},
+		// guardx#177 起凭证键的未引号值吃满行尾：括号掩码后的 tail 属于被吞
+		// 区间（over-mask 是安全方向的既定代价）。
+		{`password=["a","b"] tail`, `password=****`},
 		{`password=["a,"b`, `password=****`},
 	} {
 		if out := Redact(c.in); out != c.want {
@@ -157,13 +159,16 @@ func TestRedactBracketValueWholeMasked(t *testing.T) {
 // TestIsCredentialKeyPredicate 内置键名谓词 + 回调叠加：集成方喂自己的
 // isCredentialKey（#51①），内置词表承诺不因回调松动（回调只加不减）。
 func TestIsCredentialKeyPredicate(t *testing.T) {
-	yes := []string{"password", "api_key", "x-api-key", "access_token", "apiKey", "client_secret", "tokens"}
+	yes := []string{"password", "api_key", "x-api-key", "access_token", "apiKey", "client_secret", "tokens",
+		// keys? 收编（guardx#178）：sort_key/cache_key 此前按「中性键不误伤」
+		// 放行——#178 推翻，与文本面字面 key 规则合流（over-mask 是安全方向）
+		"key", "keys", "sort_key", "cache_key", "foo_key"}
 	for _, k := range yes {
 		if !IsCredentialKey(k) {
 			t.Errorf("IsCredentialKey(%q) = false, want true", k)
 		}
 	}
-	no := []string{"sort_key", "cache_key", "prompt_tokens", "total_tokens", "author", "keywords"}
+	no := []string{"prompt_tokens", "total_tokens", "author", "keywords"}
 	for _, k := range no {
 		if IsCredentialKey(k) {
 			t.Errorf("IsCredentialKey(%q) = true, want false", k)

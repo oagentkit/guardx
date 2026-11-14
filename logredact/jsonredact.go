@@ -36,14 +36,18 @@ import (
 // 防止 "scout_tokens" 借「s_cout_」分段绕进凭证前缀枚举。
 //
 // 与文本规则的词表同一口径但独立实现（文本键判定长在 kv 正则里，无法复用
-// 成独立谓词；两处词表要一起改）。刻意不含裸 "key"（"sort_key"/"cache_key"
-// 这类中性键误伤面太大）。
+// 成独立谓词；两处词表要一起改）。
+// keys?（oagentkit/guardx#178）：此前注释自述「刻意不含裸 key」——该裁决已
+// 被 #178 推翻：文本面的字面 key 规则一直掩裸 key（紧邻形态），JSON 面不含
+// keys? 就是两面口径分裂，`keys=`/`foo_key=`（#132 后复合前缀结构吞掉末词
+// key 的命中）整值原文透传。按 #45 的同一纪律收编：键表覆盖面即承诺边界，
+// over-mask（sort_key/cache_key 这类中性键一并被打码）是安全方向的错。
 // jsonCredentialSuffixGeneral JSON 键面的非 token 凭证词表：与文本面
 // credentialSuffixGeneral 同词同序，但分隔符收 [-_] 全集——文本 kv 的
 // `api_?keys?` 只见下划线（键后紧邻 [=:'] 形态约束），JSON 键名没有这层
 // 约束，kebab 拼法（x-api-key）必须命中（v0.18.1 修复：两处词表拆开声明，
 // 不再共用常量——共用会把文本面的窄分隔符带进 JSON 面）。
-const jsonCredentialSuffixGeneral = `(?:secrets?|pass(?:words?|wds?|es)?|pwds?|passphrases?|api[_-]?keys?|access[_-]?keys?|private[_-]?keys?|secret[_-]?keys?|client[_-]?keys?|auths?|authorization|credentials?|kubeconfig)`
+const jsonCredentialSuffixGeneral = `(?:secrets?|pass(?:words?|wds?|es)?|pwds?|passphrases?|keys?|api[_-]?keys?|access[_-]?keys?|private[_-]?keys?|secret[_-]?keys?|client[_-]?keys?|auths?|authorization|credentials?|kubeconfig)`
 
 var jsonCredentialKeyRe = regexp.MustCompile(
 	`(?i)(?:(?:` + jsonCredentialSuffixGeneral + `)(?:[_-][a-z0-9_-]*)*$` +
