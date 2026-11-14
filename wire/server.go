@@ -217,7 +217,11 @@ func (s *Server) serveOne(ctx context.Context, req Request) {
 	resp.ID = req.ID
 	// 输出字节记账在父侧（不变量 3）；超限即拒付整帧（#80）——既不静默整投
 	// （那是字节面失守），也不悄悄截断（截断会让子侧误以为拿到了完整结果）。
-	if !s.budget.charge(0, len(resp.Value)) {
+	// Error 与 Value 同为响应的输出面（guardx#185）：失败帧携带的可读原因
+	// （err.Error() 可内嵌工具输出片段、单帧上限 16MB）此前不入账——巨型
+	// Error 反复返回即可绕开 MaxBytes 预算持续推给子进程，charge 的
+	// 「超限拒付整帧」在 Error 面从未生效。两段一并记账。
+	if !s.budget.charge(0, len(resp.Value)+len(resp.Error)) {
 		_ = s.writeFrame(Response{
 			V: Version, ID: req.ID, OK: false,
 			Kind:  string(toolfail.ClassRateLimited),
@@ -348,7 +352,8 @@ func (s *Server) writeFrame(v any) error {
 type Budget struct {
 	// MaxCalls 总调用数上限。0 = 不限。
 	MaxCalls int
-	// MaxBytes 累计输出字节上限。0 = 不限。
+	// MaxBytes 累计输出字节上限。0 = 不限。记账面是响应的 Value 与 Error
+	// 两段之和（guardx#185：失败帧的可读原因同样是推给子进程的字节）。
 	MaxBytes int
 	// st 记账状态。**只经 state() 的原子原语读写**（裸指针保持 Budget 可按值
 	// 传递不复制锁；st 指针本身的并发惰性建经 CAS 同步，见 state）。
