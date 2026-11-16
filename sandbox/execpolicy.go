@@ -49,6 +49,11 @@ var controlSockets = []string{
 	"/var/run/crio/crio.sock",
 	"/var/run/podman/podman.sock",
 	"/var/run/containerd/containerd.sock",
+	// Windows 控制面（#198）：Docker Desktop/引擎命名管道族——宿主容器控制面
+	// 的 Windows 形态，与 unix socket 同等「挂上即交出控制面」的等级。
+	`\\.\pipe\docker_engine`,
+	`\\.\pipe\dockerDesktopLinuxEngine`,
+	`\\.\pipe\dockerDesktopWindowsEngine`,
 }
 
 // ExecPolicy 容器执行的硬约束面：**值类型 + 纯判据**，不执行容器。
@@ -301,10 +306,21 @@ func normalizeDigest(s string) string {
 	return s
 }
 
+// foldSlash 把 Clean 后路径的两种分隔符形态统一为 slash 形态（#198）：
+// Windows 的 Clean 会把清单里的 unix 字面量（/var/run/docker.sock）转成
+// 反斜杠形态（\var\run\docker.sock），而 unix 上 Clean/ToSlash 都不动
+// 字面反斜杠——单靠 ToSlash 在 unix 测试环境永远对不上。显式折叠让判定
+// 在两个平台都可复现（CI 无 Windows runner 也能钉住本判据）。
+func foldSlash(p string) string {
+	return strings.ReplaceAll(filepath.ToSlash(filepath.Clean(p)), `\`, `/`)
+}
+
 // isControlSocket 判路径是否落在控制面 socket 上（或其变体，如 .raw 后缀）。
+// 两侧（判定入参与清单字面量）都过 foldSlash 归一后再比较（#198）。
 func isControlSocket(p string) bool {
+	norm := foldSlash(p)
 	for _, sock := range controlSockets {
-		if p == sock || strings.HasPrefix(p, sock) {
+		if norm == foldSlash(sock) || strings.HasPrefix(norm, foldSlash(sock)) {
 			return true
 		}
 	}
