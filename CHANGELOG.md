@@ -2,6 +2,55 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.27.0] — 2026-11-16
+
+### 新增(sandbox)：容器执行硬约束面 ExecPolicy/Judge（#193）
+
+- 5713fb9
+
+### 修复(logredact)：credential-kv 掩码区豁免——行尾变体不再吞外来掩码收尾 »
+
+stringx.Masker 的 «kind:****» 恰构成 kv 形态(键含 secrets/keys/token
+词表),credential-kv 行尾变体吃满行尾把 » 一并替换——掩码括号不配对,
+下游按掩码形态做的配对统计/还原/审计全失真。
+- Re 加左边界组 (^|[^A-Za-z0-9]) 消费键前一字符,Repl 回填(),
+  命中输出与加组前逐字节一致
+- credentialKvGuard:边界紧贴 « ⇒ 掩码区豁免(与 bareUserinfoGuard
+  同款先例);法式引号 « password:(« 后带空格)边界是空格照常掩——
+  不为保括号开泄漏口
+- credentialKvRe 单源(bareUserinfoRe 同款纪律,两处字面量必漂移)
+回归:三形态掩码幂等原样+括号配对断言;裸凭证/法式引号反证不泄漏。
+全仓 -race 11 包绿,lint 0 issues。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.51.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.50.0` | `v0.51.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.50.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.48.0` | `v0.50.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
 ## [v0.26.0] — 2026-11-14
 
 ### 新增(rbac)：下沉角色能力矩阵机制
