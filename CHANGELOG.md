@@ -2,6 +2,35 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.28.0] — 2026-11-16
+
+### 修复(sandbox)：控制面 socket 判据 Windows 空转修复——foldSlash 归一 + 命名管族入清单(#198)
+
+- 清单是 unix 字面量而判定入参过 filepath.Clean：Windows 上 Clean 把
+  /var/run/docker.sock 转成 \var\run\docker.sock，单侧字面量比较一条
+  命不中 ⇒ 控制面硬拒绝在 Windows 整体空转；同时 Docker Desktop 命名管
+  族（\\.\pipe\docker_engine 等）不在清单 ⇒ Windows 真实控制面零覆盖。
+- 修复：isControlSocket 两侧过 foldSlash（ToSlash + 显式反斜杠折叠——
+  unix 上 Clean/ToSlash 都不动字面反斜杠，ToSlash 单独不够）；清单补
+  docker_engine/dockerDesktopLinuxEngine/dockerDesktopWindowsEngine。
+- 回归：Windows 反斜杠形态命中、命名管族命中、.raw 变体、负例（非控制
+  面 socket/普通命名管）、Judge 层 Windows 形态挂载被拒。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.52.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.51.0` | `v0.52.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
 ## [v0.27.0] — 2026-11-16
 
 ### 新增(sandbox)：容器执行硬约束面 ExecPolicy/Judge（#193）
