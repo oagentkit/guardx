@@ -468,10 +468,10 @@ func TestServerClose(t *testing.T) {
 	defer func() { _ = pr.Close() }()
 	defer func() { _ = pw.Close() }()
 	server := NewServer(&readWriter{r: pr, w: pw}, nil)
-	if err := server.Close(); err != nil {
+	if err := server.Close(context.Background()); err != nil {
 		t.Errorf("首次关闭应无错: %v", err)
 	}
-	if err := server.Close(); err != nil {
+	if err := server.Close(context.Background()); err != nil {
 		t.Errorf("重复关闭应无错: %v", err)
 	}
 }
@@ -482,10 +482,10 @@ func TestClientClose(t *testing.T) {
 	defer func() { _ = pr.Close() }()
 	defer func() { _ = pw.Close() }()
 	client := NewClient(&readWriter{r: pr, w: io.Discard})
-	if err := client.Close(); err != nil {
+	if err := client.Close(context.Background()); err != nil {
 		t.Errorf("首次关闭应无错: %v", err)
 	}
-	if err := client.Close(); err != nil {
+	if err := client.Close(context.Background()); err != nil {
 		t.Errorf("重复关闭应无错: %v", err)
 	}
 }
@@ -809,7 +809,7 @@ func TestServerCloseStopsServing(t *testing.T) {
 	if _, err := client.Call(context.Background(), "t", ""); err != nil {
 		t.Fatalf("Close 前的调用应成功: %v", err)
 	}
-	if err := server.Close(); err != nil {
+	if err := server.Close(context.Background()); err != nil {
 		t.Fatalf("Close 应无错: %v", err)
 	}
 	select {

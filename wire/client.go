@@ -144,8 +144,9 @@ func (c *Client) CallWithID(ctx context.Context, id, tool, args string) (Respons
 	}
 }
 
-// Close 关闭客户端（幂等）。
-func (c *Client) Close() error {
+// Close 关闭客户端（幂等）。ctx 为生命周期契约参数（oekit Close(ctx) error
+// 同型）：Close 立即 fail-all 在途 pending，ctx 当前不阻塞任何步骤。
+func (c *Client) Close(ctx context.Context) error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()

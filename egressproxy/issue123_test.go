@@ -88,7 +88,7 @@ func TestConnectViaMappedIPv6LiteralEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start proxy: %v", err)
 	}
-	defer func() { _ = px.Close() }()
+	defer func() { _ = px.Close(context.Background()) }()
 
 	conn, err := net.Dial("tcp", listen[len("http://"):])
 	if err != nil {

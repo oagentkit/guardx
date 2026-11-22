@@ -1,6 +1,7 @@
 package egressproxy_test
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,7 +24,7 @@ func startProxy(t *testing.T, p egressproxy.Policy) *url.URL {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { _ = px.Close() })
+	t.Cleanup(func() { _ = px.Close(context.Background()) })
 	u, err := url.Parse(addr)
 	if err != nil {
 		t.Fatalf("解析代理地址 %q: %v", addr, err)
