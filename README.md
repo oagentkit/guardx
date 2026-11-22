@@ -41,6 +41,8 @@ github.com/oagentkit/guardx → fence injectband logredact egress egressproxy pe
 | 包 | 行数 | 职责 |
 |---|---|---|
 | `permgate` | ~500 | 能力门禁：`Capability` / `Rule` / `Ruleset` / `Decision`。判定链以 deny 优先于 approval，输出可审计的裁决结构 |
+| `netguard` | ~1315 | 出站 URL 守卫（SSRF）加强面：**名字层先拒**（解析前按名拒——云元数据名 + 非公网命名空间后缀 `.internal`/`.local`/`.localdomain`/`.lan`）+ 解析后逐 IP 过 **`egress`**（IP 策略单源 egress，本包不私补网段表）+ 重定向逐跳重验 + `DialFunc` 落建连那一刻并**核对真实 RemoteAddr**（闭合 rebinding 窗口）+ 策略面**整份原子交换 + 代次可观测 + 变更订阅**（两次独立取会读到撕裂策略）。与 `egress` 分工：egress 判「这个 IP 能不能出」，本包判「这个名字能不能出 + 这份策略现在是不是同一份」；与 `oekit/pkg/urlguard` 的后缀**已知差异**由 `netguard/urlguard_equiv_test.go` 逐条钉住 |
+| `ticket` | ~444 | 一次性短时授权票据（准入凭据）：`Issue` 签发 / `Consume` **单次消费**（用过即焚，同 id 二次消费必然失败，不是「尽量不重复」）/ `TTL` 过期即失效（过期判定与消费判定**同一次原子操作**）/ 用途绑定（载荷语义归宿主解释）+ `Backend` 存储接缝（判定留本包、原子性与**时间权威**归存储——节点时钟不得参与过期判定）。机制与策略分离：本包不决定谁能签、能干什么、过期多久 |
 | `rbac` | ~470 | **角色能力矩阵机制**（机制 only，词表宿主注入）：`Matrix`（角色→能力集）+ `Can` 查表（矩阵外无能力，fail-closed）+ 只读档**由矩阵推导**（不硬编码角色名；写面词表未声明 ⇒ 全禁）+ `Snapshot` 授权面指纹（确定性序列化）+ `Lint`「矩阵不得装饰化」骨架（消费点回调宿主注入，未注入 = 逐词报疑点）。与 permgate 分工：permgate 裁「这次调用要不要人确认」（调用面），rbac 裁「这个角色有没有这个能力」（角色面） |
 | `invoke` | ~300 | 工具调用统一契约 + 不可绕过的调用链（构造即保证）。**框架无关**：不携带 eino / policy 的类型 |
 | `logredact` | ~477 | 凭据脱敏：日志与异常面在落盘/外发前的凭据抹除 |
@@ -59,16 +61,25 @@ github.com/oagentkit/guardx → fence injectband logredact egress egressproxy pe
 
 ## 出站防护选型：guardx/egress vs oekit/pkg/urlguard
 
-出站 SSRF 判定在生态里有**两套**实现：本仓 `egress`（+ `egressproxy`）与
-[`oekit/pkg/urlguard`](https://github.com/oekit/pkg)。两套共享同一份禁止段
-口径（私网/回环/链路本地（含云元数据）/CGNAT/special-use IPv6/exotic IPv4
-字面量），等价性由 `egress/urlguard_equiv_test.go` 的语料测试钉住——任一侧
-段表漂移，CI 即红（#118：判定表不双维护的守门）。
+出站 SSRF 判定在生态里有**三套**实现：本仓 `egress`（+ `egressproxy`）、本仓
+`netguard`（2026-11-23 自 goagent-kernel 迁入）与
+[`oekit/pkg/urlguard`](https://github.com/oekit/pkg)。`egress` 与 `urlguard` 共享
+同一份禁止段口径（私网/回环/链路本地（含云元数据）/CGNAT/special-use IPv6/exotic
+IPv4 字面量），等价性由 `egress/urlguard_equiv_test.go` 的语料测试钉住——任一侧
+段表漂移，CI 即红（#118：判定表不双维护的守门）。`netguard` 的 IP 策略**单源
+egress**（它不私补网段表），域名后缀层与 `urlguard` 的**已知差异**由
+`netguard/urlguard_equiv_test.go` 逐条钉住。
+
+**三套的关系**：`urlguard` 判「这个 URL 字面量能不能发」（自配 webhook 出站）；
+`egress` 判「这个 IP 能不能出」（LLM 可控 URL，含解析层与重定向守卫）；
+`netguard` 判「这个名字能不能出 + 这份策略现在是不是同一份」——它**复用** egress
+的 IP 判定，只补名字层与可热替换的策略面（原子交换 + 代次 + 订阅）。
 
 **选型一句话**：目标由 **LLM 决定** → `egress`（解析层判定 + 已检地址钉住 +
 重定向守卫是那套没有的组合）；URL 由**管理员配置**（自配 webhook 出站）→
 `urlguard`（精确 host 钉版与自定义策略钩子是这套没有的入口）；**子进程/原生
-工具的流量** → `egressproxy`（本地代理，另议）。
+工具的流量** → `egressproxy`（本地代理，另议）；**要求「按名先拒」+ 策略面可
+热替换（原子交换 + 代次 + 订阅）** → `netguard`（IP 判定仍走 egress，不另持一份）。
 
 | 能力 | `oekit/pkg/urlguard` | `guardx/egress` | `guardx/egressproxy` |
 |---|---|---|---|
@@ -86,6 +97,16 @@ github.com/oagentkit/guardx → fence injectband logredact egress egressproxy pe
 已知差异（语义刻意不同，非段表漂移，语料测试逐条钉住）：约定后缀与非 ASCII
 host 的字面量层结论不同——`egress` 对域名**不解析**是其明示边界（解析层
 `CheckResolving` / `DialFunc` 兜底），选型时按「谁来解析」对号入座。
+
+### `netguard` 加在哪一层
+
+| 能力 | `egress` | `netguard` |
+|---|---|---|
+| IP 判定 | netip 谓词，**单源** | **复用 egress**（不另持网段表） |
+| 名字层（解析前按名拒） | 无（只判 localhost 域） | 云元数据名 + `.internal`/`.local`/`.localdomain`/`.localhost`/`.lan`（带前导点号 ⇒ 只拦子域不拦顶级域） |
+| 策略面 | `Policy` 值（不可变） | 整份**原子交换 + 代次 + 变更订阅** |
+| 拨号层 | `Policy.NewClient`（拨号 + 重定向） | `DialFunc`（建连那一刻 + **核对真实 RemoteAddr**） |
+| 重定向 | `NewClient` 内建 | 逐跳重验 |
 
 ## 提示注入的两个方向
 

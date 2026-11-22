@@ -2,6 +2,31 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.29.0] — 2026-11-23
+
+### 新增(netguard)：出站守卫迁入本仓——名字层 + 策略面代次，IP 策略单源 egress
+
+- 自 goagent-kernel 迁入（该仓 v0.73.0 起删除本包）。归位理由按**概念域**判：
+  出站守卫属**执行安全域**，与 egress 同族同层——机制留在编排内核、而它的判据
+  依据（IP 策略）在 guardx，是分层倒挂。
+- IP 判定**单源 egress**（本包不私补网段表）；与 `oekit/pkg/urlguard` 的域名后缀
+  **已知差异**由新增的 `netguard/urlguard_equiv_test.go` 逐条钉住（顶级域粒度 +
+  `.lan` 两处差异）——差异从「靠人记得比对」变成机器守门。
+- 导出面与判据与迁前逐字一致（包内零 kernel 内部依赖，迁入即等价）。
+
+### 新增(ticket)：一次性短时授权票据迁入本仓
+
+- 自 goagent-kernel 迁入（该仓 v0.73.0 起删除本包）。归位理由：一次性授权票据属
+  **执行安全域**（准入凭据），与 permgate / rbac / fence 同族。
+- 零外部依赖（纯标准库），符合本仓 tier 0 的零第三方依赖地板。
+- 导出面与判据与迁前逐字一致。
+
+### 兼容面
+
+- 本次为**新增**两个包，本仓无破坏性变更。下游若从
+  `github.com/yi-nology/goagent-kernel` 引用 `netguard` / `ticket`，
+  改指 `github.com/oagentkit/guardx/<pkg>` 即可。
+
 ## [v0.28.0] — 2026-11-16
 
 ### 修复(sandbox)：控制面 socket 判据 Windows 空转修复——foldSlash 归一 + 命名管族入清单(#198)
