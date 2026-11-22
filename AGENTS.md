@@ -1,13 +1,13 @@
 # AGENTS.md — oagentkit/guardx
 
-> 安全围栏，11 个包：`fence` `injectband` `logredact` `egress` `egressproxy` `permgate` `rbac` `invoke` `toolfail` `sandbox` `wire`
+> 安全围栏，13 个包：`fence` `injectband` `logredact` `egress` `egressproxy` `netguard` `permgate` `rbac` `invoke` `ticket` `toolfail` `sandbox` `wire`
 > module：`github.com/oagentkit/guardx` · org：[oagentkit = Open Agent Kit](https://github.com/oagentkit)
 > 矩阵分层：**tier 0（基础层）**
 
 ## 本仓包含
 
 ```
-fence/  injectband/  logredact/  egress/  egressproxy/  permgate/  rbac/  invoke/  toolfail/  sandbox/  wire/
+fence/  injectband/  logredact/  egress/  egressproxy/  netguard/  permgate/  rbac/  invoke/  ticket/  toolfail/  sandbox/  wire/
 ```
 
 **本仓是 1 个 Go module、1 条版本线、零第三方依赖。**
