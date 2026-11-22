@@ -87,6 +87,11 @@ func (p *Proxy) Start() (string, error) {
 	}
 	p.ln = ln
 	p.srv = &http.Server{Handler: p, ReadHeaderTimeout: 10 * time.Second}
+	// 裸 go func 豁免（仓规「禁裸 go func」的已评审例外）：net/http 对 handler
+	// panic 自带 recover（连打日志带断连），Serve 本体的失败面经返回值进
+	// OnError 侧不可达——这里唯一丢弃的是「监听器已关后的 Serve 返回」，属
+	// 正常停机路径。与 wire 的 goSafe 不同：这不是业务 handler 的 panic 收编
+	// 问题，是 http.Server 的自恢复契约。
 	go func() { _ = p.srv.Serve(ln) }()
 	return "http://" + ln.Addr().String(), nil
 }
@@ -99,8 +104,11 @@ func (p *Proxy) Addr() string {
 	return p.ln.Addr().String()
 }
 
-// Close 停止服务并释放连接（幂等）。
-func (p *Proxy) Close() error {
+// Close 停止服务并释放连接（幂等）。ctx 为生命周期契约参数（oekit
+// Close(ctx) error 同型）：http.Server.Close 是立即路径，ctx 当前不阻塞
+// 任何步骤——要「等在飞请求收尾」的优雅停机语义走 http.Server.Shutdown
+// （未来如需再引入，届时 ctx 才真正参与限时）。
+func (p *Proxy) Close(ctx context.Context) error {
 	if p.srv == nil {
 		return nil
 	}

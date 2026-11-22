@@ -437,7 +437,10 @@ func (b *Budget) charge(calls, bytes int) bool {
 //
 // 已在途的调用仍由各自 goroutine 收尾（向已关连接回帧会失败、被忽略）。
 // 底层不实现 io.Closer 时标志立即生效，但阻塞中的那次读要等连接自然断开。
-func (s *Server) Close() error {
+// ctx 为生命周期契约参数（oekit Close(ctx) error 同型）：Close 是立即路径，
+// ctx 当前不阻塞任何步骤——为宿主收口钩子（bootstrap AddResource 同型）
+// 直连而设；在途收尾要限时等待属于 Drain 语义，未来如需再引入。
+func (s *Server) Close(ctx context.Context) error {
 	var err error
 	s.closeOnce.Do(func() {
 		s.closedFlag.Store(true)
