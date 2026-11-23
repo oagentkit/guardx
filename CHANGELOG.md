@@ -2,6 +2,50 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.30.0] — 2026-11-23
+
+### 重构：生命周期 Close(ctx) 契约统一 + wire panic 收编接入 async 单源
+
+跨 org 协议审计确认的三处分裂，一次收口：
+- wire Server.Close/Client.Close、egressproxy Proxy.Close 统一为
+  Close(ctx) error（oekit 生命周期契约同型）：立即路径语义不变，ctx 为
+  契约参数，宿主收口钩子（bootstrap AddResource 同型）可直连；「等在飞
+  收尾」的 Drain 语义未来如需再引入，届时 ctx 才参与限时。
+- wire goSafe 从包内私有实现（标准库 log 落 panic）改为单源委托
+  oekit/concurrency/async.GoSafe：wire 的 panic 进入矩阵统一 PanicHandler
+  面，两套 panic 观测面并存问题消除。依赖面变更按仓规走本 PR 评审：
+  require 增加 oekit/concurrency（第一方 tier0，基座白名单允许），
+  AGENTS.md 的 go list -m all 快照同步三行。
+- egressproxy 的裸 go func 补豁免注释：net/http Serve 自恢复契约，与
+  handler panic 收编是两回事。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.60.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.59.0` | `v0.60.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
+- CI：tag push 也触发门禁（与 oekit 侧同口径）
+
+各仓 CI 薄调用层此前只监听 main push / PR / manual ⇒ 打 tag 不触发 CI：
+tag 那一刻没有独立证据（tag 受保护、不可重打，而「tag 后才暴露的错」一个都跑不到）。
+本 PR 只加一行：on.push 下加 tags: ['v*']，让 tag 推送也跑共享 workflow
+（Lint / Test / CHANGELOG coverage / Receipts / 矩阵登记检查），
+与 oekit 侧的薄调用层同口径。
+关联：oagentkit/.github 的 tag 面接线。
+
+
+- 文档(AGENTS)：错误协议宣告对齐实际（stdlib 同型 sentinel；BizError 限 HTTP 宿主，本 org 库层不用）
+
 ## [v0.29.0] — 2026-11-23
 
 ### 新增(import)：迁入 netguard 与 ticket——出站守卫与授权票据归执行安全域
