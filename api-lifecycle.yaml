@@ -1,0 +1,61 @@
+# api-lifecycle 定级清单（判据同源 matrix-tools docs/adr/ADR-002 引用的
+# yi-nology/goagent-kernel docs/api-compat.md：breaking 四类 / 三级承诺 / 晋级三维）
+#
+# 纪律：新增生产包 ⇒ 本清单同步登记 + 包注释打 `// 生命周期: <级别>` 标记；
+# reason 每条必填——定级是一份承诺，没有理由的承诺无从复核。
+# 门禁：matrix-tools scripts/verify_api_lifecycle.py（覆盖双向 + 标记对账）。
+
+version: 1
+packages:
+  - pkg: fence
+    level: Experimental
+    since: v0.30.0
+    reason: 提示词注入卫生原语——把不可信内容包进显式数据区并中和围栏标记（Data 防伪造结束标记），另附注入特征信号计数；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: logredact
+    level: Experimental
+    since: v0.30.0
+    reason: 日志/审计载荷凭据脱敏——连接串/URL/头中的凭据落日志前模式化打码，规则表公开可组合（Rules/RedactWith）；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: egress
+    level: Experimental
+    since: v0.30.0
+    reason: 出口围栏——LLM 可控 URL 的字面量层 SSRF 防护（阻断私网/保留段 IP 字面量；域名零 DNS 防护是明示边界，域名面靠 CheckResolving）；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: egressproxy
+    level: Experimental
+    since: v0.30.0
+    reason: 进程级出口强制——只监听回环的本地 HTTP 代理（含 CONNECT 隧道），兑现「声明了受限出口」的子进程流量；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: permgate
+    level: Experimental
+    since: v0.30.0
+    reason: 工具调用许可判定链——谁在什么模式下对什么输入得到 allow/ask/deny，优先级顺序是踩坑固化（对标 permission/service.ts 状态机）；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: injectband
+    level: Experimental
+    since: v0.30.0
+    reason: 系统带外注入提示的防伪包裹通道——防不可信文本伪造包裹边界把注入抬出数据区，与 fence 分工互补（一个封带外提示、一个封数据区）；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: invoke
+    level: Experimental
+    since: v0.30.0
+    reason: 不可绕过的工具调用链——门禁链由构造保证而非调用点自觉（Stage/Handler panic 收编、outcome 统一）；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: toolfail
+    level: Experimental
+    since: v0.30.0
+    reason: 工具调用失败分类契约——「这个失败值不值得重试」的机械判据，编排引擎退避重试的依据；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: sandbox
+    level: Experimental
+    since: v0.30.0
+    reason: 执行沙箱的档位语义与后端协议——声明「能力面多强 +预算兑现哪几项」，不假装能验证隔离强度；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: wire
+    level: Experimental
+    since: v0.30.0
+    reason: 执行沙箱的跨进程调用协议——程序出宿主进程后的工具回调与预算通道（frame/gosafe/runner）；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: netguard
+    level: Experimental
+    since: v0.30.0
+    reason: 出站 URL 守卫（SSRF 防护）——服务端代发 HTTP 的出口统一过闸（scheme 白名单 + 解析后逐 IP 过策略）；代码包注释已有 Experimental 既有标记，一致沿用；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: rbac
+    level: Experimental
+    since: v0.30.0
+    reason: 角色能力矩阵机制——角色→能力集查表（Can）、只读档由矩阵推导、授权面指纹（Snapshot）；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: ticket
+    level: Stable
+    since: v0.30.0
+    reason: 一次性短时授权票据（准入凭据）；代码级 Stable 标记既有（additive-only 承诺），沿用

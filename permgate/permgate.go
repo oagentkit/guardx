@@ -2,6 +2,8 @@
 // allow/ask/deny。对标 ZCode permission/service.ts 的优先级状态机——顺序是
 // 踩坑固化的，别调换：
 //
+// 生命周期: Experimental——未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容。
+//
 //	requiresUserInteraction → ask（交互型工具天然要用户）
 //	alwaysAsk 硬阻断段 → disallowed/project-deny 仍压过「问」（被硬禁的
 //	  工具不能退化成「弹窗一点就能跑」）

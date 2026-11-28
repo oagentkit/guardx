@@ -1,6 +1,8 @@
 // Package egressproxy 进程级出口强制：一个只监听回环的本地 HTTP 代理
 // （含 `CONNECT` 隧道），作为「声明了受限出口」的**兑现件**。
 //
+// 生命周期: Experimental——未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容。
+//
 // # 它补的是哪个洞
 //
 // 子进程（以及宿主起的 curl / git / 各种 native 工具）的出站流量在编排进程的
