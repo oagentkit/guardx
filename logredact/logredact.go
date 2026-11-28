@@ -1,6 +1,8 @@
 // Package logredact 日志/审计载荷凭据脱敏：连接串/URL/头中的凭据在落日志前模式化打码。
 // 与 fence（Markdown/HTML 注入卫生）正交——本包打码凭据。
 //
+// 生命周期: Experimental——未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容。
+//
 // 规则表是**公开且可组合**的：Rules() 给出内置表副本，RedactWith / NewRedactor
 // 接受调用方自己的扩展规则。下游各家的凭据形态不一样（厂商前缀族、裸 hex、
 // 任意 scheme 的 URL…），把表关在包内就等于逼下游**重写一整份脱敏器**，

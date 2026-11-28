@@ -1,6 +1,8 @@
 // Package egress 出口围栏：LLM 可控 URL 的字面量层 SSRF 防护——阻断指向
 // 本机/私网/保留段的 IP 字面量与 localhost 域，放行普通域名。
 //
+// 生命周期: Experimental——未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容。
+//
 // ⚠️ **域名 = 零 DNS 防护**：Check / CheckHost 系列对域名不做解析，私网/
 // 云元数据/CGNAT 等 IP 策略可被「解析到内网的域名」全量绕过，也没有任何
 // DNS-rebinding 防护。**LLM 可控 URL 的场景请用 CheckResolving /

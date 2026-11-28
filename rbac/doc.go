@@ -1,6 +1,8 @@
 // Package rbac 角色能力矩阵机制：角色→能力集查表（Can）、只读档由矩阵推导、
 // 授权面指纹（Snapshot）、「矩阵不得装饰化」的 lint 骨架。
 //
+// 生命周期: Experimental——未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容。
+//
 // # 只收机制，词表是宿主数据
 //
 // 本包**不预设任何具体角色名或能力词**——"admin"、"platform.read"、

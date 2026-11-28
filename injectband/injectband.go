@@ -1,5 +1,7 @@
 // Package injectband 系统带外注入提示的**防伪包裹通道**。
 //
+// 生命周期: Experimental——未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容。
+//
 // # 与 fence 的分工
 //
 // 两者互补而非替代，各自封一个方向：

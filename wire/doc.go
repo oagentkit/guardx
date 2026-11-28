@@ -1,5 +1,7 @@
 // Package wire 执行沙箱的**跨进程调用协议**。
 //
+// 生命周期: Experimental——未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容。
+//
 // # 它解决什么
 //
 // 沙箱档位（Level）答的是「能力面多强」，预算支持面（Capable）答的是「资源兜底
